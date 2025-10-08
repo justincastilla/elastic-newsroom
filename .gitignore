@@ -1,0 +1,13 @@
+articles/*.md
+newsroom.log
+reporter.log
+news_chief.log
+.venv/
+*.pyc
+__pycache__/
+.env
+CLAUDE.md
+
+# Agent logs and PIDs
+logs/
+.newsroom_pids

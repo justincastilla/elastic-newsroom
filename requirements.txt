@@ -1,0 +1,18 @@
+# Official A2A SDK
+a2a-sdk[all]==0.3.8
+
+# Core dependencies (let A2A SDK manage versions)
+uvicorn
+httpx
+click
+watchfiles  # For hot reload
+
+# AI/LLM
+anthropic>=0.18.0
+
+# Elasticsearch
+elasticsearch>=9.1.1
+
+# Utilities
+python-dotenv==1.0.0
+loguru==0.7.2

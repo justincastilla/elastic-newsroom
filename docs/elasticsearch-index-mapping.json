@@ -1,0 +1,202 @@
+{
+  "settings": {
+    "analysis": {
+      "analyzer": {
+        "article_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "asciifolding",
+            "stop",
+            "snowball"
+          ]
+        },
+        "headline_analyzer": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": [
+            "lowercase",
+            "asciifolding"
+          ]
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "story_id": {
+        "type": "keyword"
+      },
+      "headline": {
+        "type": "text",
+        "analyzer": "headline_analyzer",
+        "copy_to": ["headline_semantic"]
+      },
+      "content": {
+        "type": "text",
+        "analyzer": "article_analyzer",
+        "fields": {
+          "standard": {
+            "type": "text",
+            "analyzer": "standard"
+          }
+        },
+        "copy_to": ["content_semantic"]
+      },
+      "content_semantic": {
+        "type": "semantic_text"
+      },
+      "topic": {
+        "type": "text",
+        "analyzer": "standard",
+        "copy_to": ["content_semantic"]
+      },
+      "angle": {
+        "type": "text",
+        "analyzer": "standard",
+        "copy_to": ["content_semantic"]
+      },
+      "word_count": {
+        "type": "integer"
+      },
+      "target_length": {
+        "type": "integer"
+      },
+      "priority": {
+        "type": "keyword"
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "published_at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "created_at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "updated_at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "deadline": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "author": {
+        "type": "keyword"
+      },
+      "editor": {
+        "type": "keyword"
+      },
+      "tags": {
+        "type": "keyword"
+      },
+      "categories": {
+        "type": "keyword"
+      },
+      "research_questions": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "research_data": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "text"
+          },
+          "summary": {
+            "type": "text"
+          },
+          "facts": {
+            "type": "text"
+          },
+          "figures": {
+            "type": "object",
+            "properties": {
+              "percentages": {
+                "type": "keyword"
+              },
+              "dollar_amounts": {
+                "type": "keyword"
+              },
+              "numbers": {
+                "type": "keyword"
+              },
+              "dates": {
+                "type": "keyword"
+              },
+              "companies": {
+                "type": "keyword"
+              }
+            }
+          },
+          "sources": {
+            "type": "keyword"
+          },
+          "confidence": {
+            "type": "integer"
+          }
+        }
+      },
+      "editorial_review": {
+        "type": "object",
+        "properties": {
+          "approval_status": {
+            "type": "keyword"
+          },
+          "overall_assessment": {
+            "type": "text"
+          },
+          "grammar_check": {
+            "type": "text"
+          },
+          "tone_assessment": {
+            "type": "text"
+          },
+          "consistency_check": {
+            "type": "text"
+          },
+          "length_check": {
+            "type": "text"
+          },
+          "suggested_edits_count": {
+            "type": "integer"
+          },
+          "reviewed_at": {
+            "type": "date"
+          }
+        }
+      },
+      "archive_references": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "url_slug": {
+        "type": "keyword"
+      },
+      "filepath": {
+        "type": "keyword"
+      },
+      "version": {
+        "type": "integer"
+      },
+      "revisions_count": {
+        "type": "integer"
+      },
+      "agents_involved": {
+        "type": "keyword"
+      },
+      "workflow_duration_ms": {
+        "type": "long"
+      },
+      "metadata": {
+        "type": "object",
+        "enabled": true,
+        "dynamic": true
+      }
+    }
+  }
+}
