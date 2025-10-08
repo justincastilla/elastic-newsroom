@@ -1,119 +1,220 @@
 # Elastic News - AI-Powered Digital Newsroom
 
-A demonstration of Agent2Agent (A2A) protocols and Model Context Protocol (MCP) integration in a multi-agent newsroom system, built using the official [A2A Python SDK](https://github.com/a2aproject/a2a-python).
+A working demonstration of Agent2Agent (A2A) protocols in a multi-agent newsroom system, built using the official [A2A Python SDK](https://github.com/a2aproject/a2a-python) v0.3.8.
 
 ## Overview
 
-This project implements a digital newsroom where specialized AI agents collaborate to research, write, edit, and publish news articles. The system showcases:
+This project implements a fully functional digital newsroom where specialized AI agents collaborate to research, write, edit, and publish news articles. The system features:
 
-- **Official A2A SDK**: Using the [a2a-sdk](https://github.com/a2aproject/a2a-python) for multi-agent coordination and communication
-- **MCP Integration**: Following the [A2A-MCP pattern](https://github.com/a2aproject/a2a-samples/tree/main/samples/python/agents/a2a_mcp) for standardized tool access
-- **Reference Implementation**: Based on the [A2A-MCP Travel Agent example](https://github.com/a2aproject/a2a-samples/tree/main/samples/python/agents/a2a_mcp) which demonstrates proper A2A agent structure and MCP integration
-- **Claude Sonnet 4**: Using Anthropic's latest model for AI-powered content generation and analysis
-- **Elasticsearch Integration**: For historical article search and analytics
-- **Complete Workflow**: From story assignment to publication
+- **Official A2A SDK v0.3.8**: Multi-agent coordination and communication
+- **Claude Sonnet 4**: AI-powered content generation, research, and editing
+- **Elasticsearch Integration**: Historical article indexing and search via A2A Archivist
+- **Complete Workflow**: End-to-end automation from story assignment to publication
+- **5 Working Agents**: News Chief, Reporter, Researcher, Editor, and Publisher
 
 ## Architecture
 
 ### Agents
 
-#### Internal Agents (Locally Hosted)
-- **News Chief** ✅: Coordinator/client agent that assigns stories and oversees workflow
-- **Reporter Agent** ✅: Writes articles based on research, integrates data from multiple sources
-- **Researcher Agent** ✅: Gathers facts, statistics, and background information using Anthropic
-- **Editor Agent** ✅: Reviews articles for grammar, tone, consistency, and length
+The newsroom consists of 5 specialized AI agents that communicate via the A2A protocol:
 
-#### External Agents (A2A Protocol)
-- **Archivist Agent** ✅: Searches historical articles using Elasticsearch (hosted on Elastic Serverless)
-  - URL: `<elastic_kibana_endpoint>/api/agent_builder/a2a/archive-agent`
-  - Provider: Elastic
-  - Protocol: A2A 0.3.0
-  - Features: Full-text search, ES|QL queries, index exploration
+#### Local Agents (Ports 8080-8084)
 
-#### Planned Agents
-- **Printer Agent**: Publishes approved articles via CI/CD
+1. **News Chief** (Port 8080)
+   - Coordinator agent that assigns stories and manages workflow
+   - Delegates tasks to Reporter, Researcher, Editor, and Publisher
+   - Tracks story status and completion
 
-### MCP Servers (Dummy for Testing)
-- News API MCP Server
-- Fact-Checking MCP Server
-- Grammar Checker MCP Server
-- SEO Analysis MCP Server
-- CMS MCP Server
-- CI/CD MCP Server
-- Analytics MCP Server
+2. **Reporter** (Port 8081)
+   - Writes articles based on research data
+   - Consults Archivist for historical context
+   - Integrates research findings into cohesive narratives
+
+3. **Researcher** (Port 8083)
+   - Gathers facts, statistics, and background information
+   - Uses Claude Sonnet 4 for research synthesis
+   - Provides structured data to Reporter
+
+4. **Editor** (Port 8082)
+   - Reviews articles for grammar, tone, and consistency
+   - Checks word count against target length
+   - Provides editorial feedback and suggestions
+   - Generates SEO metadata (tags, summary, headline refinement)
+
+5. **Publisher** (Port 8084)
+   - Indexes articles to Elasticsearch
+   - Saves articles as markdown files
+   - Updates article status to "published"
+
+#### External Agent (A2A Protocol)
+
+- **Archivist Agent**
+  - Hosted on Elastic Cloud (Kibana Agent Builder)
+  - Searches historical articles via A2A protocol
+  - Provides context about past coverage
+  - Accessed via agent card URL
 
 ## Quick Start
 
+### 1. Install Dependencies
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Set up environment variables
-cp env.example .env
-# Edit .env with your API keys and configuration
-
-# Start the newsroom (coming soon)
-python main.py
 ```
+
+### 2. Configure Environment
+```bash
+cp env.example .env
+# Edit .env with your credentials:
+# - ANTHROPIC_API_KEY (required)
+# - ELASTICSEARCH_ENDPOINT (required)
+# - ELASTIC_SEARCH_API_KEY (required)
+# - ELASTIC_ARCHIVIST_AGENT_CARD_URL (required)
+# - ELASTIC_ARCHIVIST_API_KEY (required)
+```
+
+See [Configuration Guide](docs/configuration-guide.md) for detailed setup instructions.
+
+### 3. Create Elasticsearch Index
+```bash
+python scripts/create_elasticsearch_index.py
+```
+
+### 4. Start All Agents
+```bash
+# Start all 5 agents in the background
+./start_newsroom.sh
+
+# Or with hot reload for development
+./start_newsroom.sh --reload
+
+# Stop all agents
+./start_newsroom.sh --stop
+```
+
+### 5. Run the Workflow
+```bash
+python tests/test_newsroom_workflow.py
+```
+
+This will:
+1. Assign a story via News Chief
+2. Have Researcher gather information
+3. Have Reporter write the article (consulting Archivist)
+4. Have Editor review and refine the article
+5. Have Publisher index to Elasticsearch and save to file
 
 ## Project Structure
 
 ```
 elastic-news/
-├── agents/                 # A2A agents using official SDK
-│   ├── news_chief.py
-│   ├── reporter.py
-│   ├── researcher.py
-│   ├── archive.py
-│   ├── editor.py
-│   └── printer.py
-├── mcp_servers/           # MCP server implementations
-│   ├── news_api/
-│   ├── fact_checking/
-│   ├── grammar/
-│   ├── seo/
-│   ├── cms/
-│   └── analytics/
-├── elasticsearch/         # Elasticsearch integration
-│   ├── client.py
-│   └── queries.py
-├── config/                # Configuration files
-├── tests/                 # Test suite
-└── docs/                  # Documentation
+├── agents/                      # A2A agents using official SDK
+│   ├── __init__.py             # Agent module exports
+│   ├── news_chief.py           # Story coordinator (port 8080)
+│   ├── reporter.py             # Article writer (port 8081)
+│   ├── researcher.py           # Research gatherer (port 8083)
+│   ├── editor.py               # Content reviewer (port 8082)
+│   └── publisher.py            # Article publisher (port 8084)
+├── scripts/                     # Utility scripts
+│   └── create_elasticsearch_index.py
+├── tests/                       # Test suite
+│   ├── test_newsroom_workflow.py    # End-to-end workflow test
+│   └── test_elasticsearch_index.py  # ES index creation test
+├── docs/                        # Documentation
+│   ├── configuration-guide.md   # Environment setup
+│   ├── elasticsearch-schema.md  # Index mapping
+│   ├── news-chief-agent.md      # News Chief details
+│   └── archivist-integration.md # Archivist setup
+├── articles/                    # Published articles (auto-generated)
+├── logs/                        # Agent logs (auto-generated)
+├── start_newsroom.sh            # Start/stop all agents
+├── requirements.txt             # Python dependencies
+├── env.example                  # Environment template
+└── README.md                    # This file
 ```
 
-## Development Status
+## Features
 
-🚧 **In Development** - This project is being built iteratively:
+✅ **Currently Working**
 
-1. ✅ **Project Setup** - Basic structure and official A2A SDK integration
-2. 🔄 **Single Agent** - Creating first A2A agent (News Chief)
-3. ⏳ **Agent Communication** - Adding second agent and testing A2A communication
-4. ⏳ **MCP Integration** - Adding MCP servers following A2A-MCP pattern
-5. ⏳ **Full Newsroom** - Complete workflow implementation
+- **Multi-Agent Coordination**: 5 agents communicate via A2A protocol
+- **Complete Workflow**: End-to-end article production from assignment to publication
+- **Elasticsearch Integration**: Historical article indexing and search
+- **External Agent Integration**: Optional Archivist agent via A2A protocol
+- **Claude Sonnet 4**: AI-powered research, writing, and editing
+- **Process Management**: Single command to start/stop all agents
+- **Comprehensive Logging**: Individual log files for each agent
+- **Hot Reload Support**: Development mode with auto-reload
 
-## Features (Planned)
+🔄 **In Progress**
 
-- Multi-agent coordination via official A2A SDK
-- Standardized tool access via MCP servers
-- Elasticsearch-powered historical article search
-- Complete newsroom workflow automation
-- Real-time agent communication and status tracking
-- Comprehensive error handling and retry logic
+- Additional MCP server integrations
+- Enhanced error handling and retry logic
+- Performance monitoring and metrics
 
 ## Documentation
 
-- [Setup Guide](docs/setup.md) (coming soon)
-- [API Reference](docs/api.md) (coming soon)
-- [Agent Communication](docs/a2a-protocol.md) (coming soon)
-- [MCP Integration](docs/mcp-servers.md) (coming soon)
-- [Workflow Examples](docs/workflows.md) (coming soon)
+- [Configuration Guide](docs/configuration-guide.md) - Environment setup and API configuration
+- [Elasticsearch Schema](docs/elasticsearch-schema.md) - Index mapping and field definitions
+- [News Chief Agent](docs/news-chief-agent.md) - Coordinator agent details
+- [Archivist Integration](docs/archivist-integration.md) - External agent setup
 
-## Contributing
+## Workflow Example
 
-Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+```
+News Chief assigns story → Researcher gathers data →
+Reporter writes article (consults Archivist) →
+Editor reviews and refines → Publisher indexes to Elasticsearch
+```
+
+## Commands
+
+### Start/Stop Agents
+```bash
+./start_newsroom.sh           # Start all agents
+./start_newsroom.sh --reload  # Start with hot reload
+./start_newsroom.sh --stop    # Stop all agents
+```
+
+### View Logs
+```bash
+tail -f logs/*.log            # All agents
+tail -f logs/News_Chief.log   # Specific agent
+```
+
+### Run Tests
+```bash
+python tests/test_newsroom_workflow.py    # End-to-end workflow
+python tests/test_elasticsearch_index.py  # Elasticsearch index test
+```
+
+### Individual Agents
+```bash
+uvicorn agents.news_chief:app --host localhost --port 8080
+uvicorn agents.reporter:app --host localhost --port 8081
+uvicorn agents.researcher:app --host localhost --port 8083
+uvicorn agents.editor:app --host localhost --port 8082
+uvicorn agents.publisher:app --host localhost --port 8084
+```
+
+## Agent Card URLs
+
+Each agent exposes its capabilities via agent card:
+- News Chief: `http://localhost:8080/.well-known/agent-card.json`
+- Reporter: `http://localhost:8081/.well-known/agent-card.json`
+- Editor: `http://localhost:8082/.well-known/agent-card.json`
+- Researcher: `http://localhost:8083/.well-known/agent-card.json`
+- Publisher: `http://localhost:8084/.well-known/agent-card.json`
+
+## Technology Stack
+
+- **A2A SDK**: v0.3.8 ([a2a-python](https://github.com/a2aproject/a2a-python))
+- **AI Model**: Anthropic Claude Sonnet 4
+- **Search**: Elastic Serverless
+- **Web Framework**: Starlette (via A2A SDK)
+- **Server**: Uvicorn ASGI server
+- **Language**: Python 3.10+
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
