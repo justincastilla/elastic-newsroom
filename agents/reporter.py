@@ -12,23 +12,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 
 import click
-import uvicorn
 import httpx
-from anthropic import Anthropic
-from dotenv import load_dotenv, dotenv_values
-
-# Load environment variables from .env file
-# First try load_dotenv() which loads into os.environ
-load_dotenv()
-
-# Also get values directly as a backup
-env_config = dotenv_values('.env')
-if env_config:
-    # If dotenv_values found config, ensure it's in os.environ
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -36,7 +20,10 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
-from utils import setup_logger
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+
+# Load environment variables
+load_env_config()
 
 # Configure logging using centralized utility
 logger = setup_logger("REPORTER")
@@ -57,14 +44,11 @@ class ReporterAgent:
         # Get Archivist URL from environment or parameter
         self.archivist_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")
         self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
-        self.anthropic_client = None
-
-        # Initialize Anthropic client if API key is available
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-        else:
-            logger.warning("ANTHROPIC_API_KEY not set - will use mock article generation")
+        
+        # Initialize Anthropic client using centralized utility
+        self.anthropic_client = init_anthropic_client(logger)
+        if not self.anthropic_client:
+            logger.warning("Will use mock article generation")
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -1332,30 +1316,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Reporter Agent server."""
-    try:
-        logger.info(f'Starting Reporter Agent server on {host}:{port}')
-        print(f"📝 Reporter Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.reporter:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Reporter",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.reporter:app" if reload else None
+    )
 
 
 if __name__ == "__main__":

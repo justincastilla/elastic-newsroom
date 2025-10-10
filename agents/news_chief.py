@@ -11,7 +11,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 import click
-import uvicorn
 import httpx
 
 from a2a.server.agent_execution import AgentExecutor
@@ -21,7 +20,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
-from utils import setup_logger
+from utils import setup_logger, run_agent_server
 
 # Configure logging using centralized utility
 logger = setup_logger("NEWS_CHIEF")
@@ -450,30 +449,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the News Chief Agent server."""
-    try:
-        logger.info(f'Starting News Chief Agent server on {host}:{port}')
-        print(f"🚀 News Chief Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.news_chief:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="News Chief",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.news_chief:app" if reload else None
+    )
 
 
 if __name__ == "__main__":

@@ -13,25 +13,17 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
-import uvicorn
 from elasticsearch import Elasticsearch
-from anthropic import Anthropic
-from dotenv import dotenv_values
-
-# Load environment variables
-env_config = dotenv_values('.env')
-if env_config:
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from utils import setup_logger
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+
+# Load environment variables
+load_env_config()
 
 # Configure logging using centralized utility
 logger = setup_logger("PUBLISHER")
@@ -67,13 +59,12 @@ class PublisherAgent:
         else:
             logger.warning("⚠️  Elasticsearch credentials not configured")
 
-        # Initialize Anthropic client for tag generation
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-            logger.info("✅ Anthropic client initialized (for tag generation)")
+        # Initialize Anthropic client using centralized utility
+        self.anthropic_client = init_anthropic_client(logger)
+        if self.anthropic_client:
+            logger.info("(for tag generation)")
         else:
-            logger.warning("⚠️  ANTHROPIC_API_KEY not set - tags will be empty")
+            logger.warning("⚠️  Tags will be empty")
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -595,30 +586,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Publisher Agent server."""
-    try:
-        logger.info(f'Starting Publisher Agent server on {host}:{port}')
-        print(f"📰 Publisher Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.publisher:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Publisher",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.publisher:app" if reload else None
+    )
 
 
 if __name__ == "__main__":
