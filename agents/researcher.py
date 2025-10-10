@@ -29,17 +29,10 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
+from utils import setup_logger
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [RESEARCHER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+# Configure logging using centralized utility
+logger = setup_logger("RESEARCHER")
 
 
 class ResearcherAgent:

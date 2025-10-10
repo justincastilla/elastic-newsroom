@@ -35,10 +35,17 @@ AGENTS=(
 
 # Parse command line arguments
 RELOAD_FLAG=""
-if [ "$1" == "--reload" ]; then
-    RELOAD_FLAG="--reload"
-    echo -e "${BLUE}🔄 Hot reload enabled${NC}"
-fi
+START_UI=false
+
+for arg in "$@"; do
+    if [ "$arg" == "--reload" ]; then
+        RELOAD_FLAG="--reload"
+        echo -e "${BLUE}🔄 Hot reload enabled${NC}"
+    elif [ "$arg" == "--with-ui" ]; then
+        START_UI=true
+        echo -e "${BLUE}🌐 UI will be started on port 3000${NC}"
+    fi
+done
 
 if [ "$1" == "--stop" ]; then
     echo -e "${YELLOW}🛑 Stopping all newsroom agents...${NC}"
@@ -58,9 +65,9 @@ if [ "$1" == "--stop" ]; then
         rm "$PID_FILE"
     fi
 
-    # Also kill any processes still bound to the ports
-    echo -e "${YELLOW}   Checking for processes on ports 8080-8084...${NC}"
-    for port in 8080 8081 8082 8083 8084; do
+    # Also kill any processes still bound to the ports (including UI port 3000)
+    echo -e "${YELLOW}   Checking for processes on ports 8080-8084, 3000...${NC}"
+    for port in 8080 8081 8082 8083 8084 3000; do
         PID=$(lsof -ti:$port 2>/dev/null)
         if [ -n "$PID" ]; then
             echo -e "${YELLOW}   Killing process on port $port (PID: $PID)...${NC}"
@@ -161,11 +168,48 @@ if [ $FAILED -eq 0 ]; then
     echo ""
     echo -e "${BLUE}📁 Logs directory: $LOG_DIR/${NC}"
     echo ""
+
+    # Start UI if requested
+    if [ "$START_UI" = true ]; then
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}🌐 Starting UI on port 3000...${NC}"
+
+        # Check if UI dependencies are installed
+        if [ ! -f "ui/pyproject.toml" ]; then
+            echo -e "${RED}   ❌ UI not found in ui/ directory${NC}"
+        else
+            # Note: Mesop has hot reload enabled by default (no flag needed)
+            cd ui
+            mesop main.py --port=3000 > "../$LOG_DIR/UI.log" 2>&1 &
+            UI_PID=$!
+            echo "UI:$UI_PID" >> "../$PID_FILE"
+            cd ..
+
+            sleep 1
+
+            if ps -p $UI_PID > /dev/null 2>&1; then
+                echo -e "${GREEN}   ✅ UI started (PID: $UI_PID)${NC}"
+                echo -e "${BLUE}      Logs: $LOG_DIR/UI.log${NC}"
+                echo -e "${BLUE}      URL: http://localhost:3000${NC}"
+                echo ""
+                echo -e "${BLUE}📝 Assignment Form:  http://localhost:3000/${NC}"
+                echo -e "${BLUE}📄 Article Viewer:   http://localhost:3000/article/{story_id}${NC}"
+            else
+                echo -e "${RED}   ❌ UI failed to start${NC}"
+                echo -e "${RED}      Check logs: $LOG_DIR/UI.log${NC}"
+            fi
+        fi
+        echo ""
+    fi
+
     echo -e "${BLUE}💡 Commands:${NC}"
     echo -e "${BLUE}   View all logs:        tail -f $LOG_DIR/*.log${NC}"
     echo -e "${BLUE}   View specific agent:  tail -f $LOG_DIR/News_Chief.log${NC}"
     echo -e "${BLUE}   Stop all agents:      ./start_newsroom.sh --stop${NC}"
     echo -e "${BLUE}   Test workflow:        python tests/test_newsroom_workflow.py${NC}"
+    if [ "$START_UI" = true ]; then
+        echo -e "${BLUE}   Open UI:              open http://localhost:3000${NC}"
+    fi
     echo ""
 else
     echo -e "${RED}⚠️  Some agents failed to start${NC}"

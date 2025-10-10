@@ -21,16 +21,10 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
+from utils import setup_logger
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [NEWS_CHIEF] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging using centralized utility
+logger = setup_logger("NEWS_CHIEF")
 
 
 class NewsChiefAgent:
@@ -212,6 +206,55 @@ class NewsChiefAgent:
             "available_reporters": self.available_reporters
         }
 
+    async def _trigger_write_async(self, story_id: str):
+        """Trigger article writing asynchronously without blocking"""
+        try:
+            logger.info(f"🔄 Background task: Sending write command for story {story_id}")
+
+            # Create a new HTTP client for this async task
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Discover Reporter agent
+                card_resolver = A2ACardResolver(http_client, self.reporter_url)
+                reporter_card = await card_resolver.get_agent_card()
+
+                # Create A2A client
+                client_config = ClientConfig(httpx_client=http_client, streaming=False)
+                client_factory = ClientFactory(client_config)
+                reporter_client = client_factory.create(reporter_card)
+
+                # Send write_article command
+                write_request = {
+                    "action": "write_article",
+                    "story_id": story_id
+                }
+                write_message = create_text_message_object(content=json.dumps(write_request))
+
+                async for response in reporter_client.send_message(write_message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            write_result = json.loads(text_content)
+                            logger.info(f"✅ Background task: Write command completed")
+                            logger.info(f"   Status: {write_result.get('status')}")
+                            logger.info(f"   Message: {write_result.get('message')}")
+
+                            # Update story status based on result
+                            if story_id in self.active_stories:
+                                if write_result.get('status') == 'success':
+                                    self.active_stories[story_id]['status'] = 'completed'
+                                    # Store article data for UI retrieval
+                                    if 'article_data' in write_result:
+                                        self.active_stories[story_id]['article_data'] = write_result['article_data']
+                                        logger.info(f"✅ Stored article data for story {story_id}")
+                                else:
+                                    self.active_stories[story_id]['status'] = 'error'
+                            break
+        except Exception as e:
+            logger.error(f"Background task error for story {story_id}: {e}")
+            if story_id in self.active_stories:
+                self.active_stories[story_id]['status'] = 'error'
+
     async def _send_to_reporter(self, assignment: Dict[str, Any]) -> Dict[str, Any]:
         """Send story assignment to Reporter agent via A2A"""
         try:
@@ -240,22 +283,43 @@ class NewsChiefAgent:
 
                 message = create_text_message_object(content=json.dumps(request))
 
-                # Get response
+                # Get response for assignment acceptance
                 logger.info(f"⏳ Waiting for Reporter response...")
+                assignment_result = None
                 async for response in reporter_client.send_message(message):
                     if hasattr(response, 'parts'):
                         part = response.parts[0]
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
-                            result = json.loads(text_content)
+                            assignment_result = json.loads(text_content)
                             logger.info(f"📬 Received A2A response from Reporter:")
-                            logger.info(f"   Status: {result.get('status')}")
-                            logger.info(f"   Message: {result.get('message')}")
-                            logger.info(f"   Reporter Status: {result.get('reporter_status')}")
-                            return result
+                            logger.info(f"   Status: {assignment_result.get('status')}")
+                            logger.info(f"   Message: {assignment_result.get('message')}")
+                            logger.info(f"   Reporter Status: {assignment_result.get('reporter_status')}")
+                            break
 
-                logger.warning("⚠️  No response from Reporter")
-                return {"status": "error", "message": "No response from Reporter"}
+                if not assignment_result:
+                    logger.warning("⚠️  No response from Reporter")
+                    return {"status": "error", "message": "No response from Reporter"}
+
+                # If assignment was accepted, trigger the Reporter to start writing (async, don't wait)
+                if assignment_result.get('status') == 'success':
+                    logger.info(f"✅ Assignment accepted, triggering article writing in background...")
+
+                    # Update story status to 'writing'
+                    story_id = assignment.get('story_id')
+                    if story_id in self.active_stories:
+                        self.active_stories[story_id]['status'] = 'writing'
+
+                    # Send write_article command but don't wait for response
+                    # The Reporter will work asynchronously
+                    import asyncio
+                    logger.info(f"📝 Triggering write_article command (async)...")
+
+                    # Fire and forget - don't wait for the response
+                    asyncio.create_task(self._trigger_write_async(story_id))
+
+                return assignment_result
 
         except Exception as e:
             logger.error(f"Failed to send assignment to Reporter: {e}", exc_info=True)
@@ -265,11 +329,23 @@ class NewsChiefAgent:
             }
 
 
+# Singleton instance of the News Chief agent to maintain state across requests
+_news_chief_agent_instance = None
+
+def get_news_chief_agent():
+    """Get or create the singleton News Chief agent instance"""
+    global _news_chief_agent_instance
+    if _news_chief_agent_instance is None:
+        _news_chief_agent_instance = NewsChiefAgent()
+    return _news_chief_agent_instance
+
+
 class NewsChiefAgentExecutor(AgentExecutor):
     """AgentExecutor for the News Chief agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = NewsChiefAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_news_chief_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""

@@ -27,8 +27,9 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
 
 2. **Reporter** (Port 8081)
    - Writes articles based on research data
-   - Consults Archivist for historical context
-   - Integrates research findings into cohesive narratives
+   - Consults Archivist via Elastic Conversational API for historical context
+   - Integrates research findings and historical references into cohesive narratives
+   - Generates structured article data (headline, content, word count)
 
 3. **Researcher** (Port 8083)
    - Gathers facts, statistics, and background information
@@ -46,19 +47,23 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
    - Saves articles as markdown files
    - Updates article status to "published"
 
-#### External Agent (A2A Protocol)
+#### External Agent (Elastic Cloud)
 
 - **Archivist Agent**
   - Hosted on Elastic Cloud (Kibana Agent Builder)
-  - Searches historical articles via A2A protocol
+  - Searches historical articles via Elastic Conversational API
   - Provides context about past coverage
-  - Accessed via agent card URL
+  - Uses `platform.core.search` skill to query `news_archive` index
+  - Returns article highlights, references, and reasoning
 
 ## Quick Start
 
 ### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
+
+# Optional: Install UI dependencies
+cd ui && pip install -e . && cd ..
 ```
 
 ### 2. Configure Environment
@@ -87,11 +92,28 @@ python scripts/create_elasticsearch_index.py
 # Or with hot reload for development
 ./start_newsroom.sh --reload
 
-# Stop all agents
+# Start agents + web UI on port 3000
+./start_newsroom.sh --with-ui
+
+# Stop all agents (and UI if running)
 ./start_newsroom.sh --stop
 ```
 
+**Web UI** (if started with `--with-ui`):
+- Assignment Form: http://localhost:3000/
+- Article Viewer: http://localhost:3000/article/{story_id}
+
 ### 5. Run the Workflow
+
+**Option 1: Web UI** (Recommended)
+```bash
+# Navigate to http://localhost:3000
+# Fill out the story assignment form
+# View real-time progress on the status page
+# Read the completed article on the article viewer page
+```
+
+**Option 2: Test Script**
 ```bash
 python tests/test_newsroom_workflow.py
 ```
@@ -99,9 +121,16 @@ python tests/test_newsroom_workflow.py
 This will:
 1. Assign a story via News Chief
 2. Have Researcher gather information
-3. Have Reporter write the article (consulting Archivist)
+3. Have Reporter write the article (consulting Archivist via Elastic Conversational API)
 4. Have Editor review and refine the article
 5. Have Publisher index to Elasticsearch and save to file
+
+**Option 3: Archivist Diagnostics**
+```bash
+python test_archivist.py
+```
+
+Tests Archivist connectivity and search functionality directly.
 
 ## Project Structure
 
@@ -114,11 +143,21 @@ elastic-news/
 │   ├── researcher.py           # Research gatherer (port 8083)
 │   ├── editor.py               # Content reviewer (port 8082)
 │   └── publisher.py            # Article publisher (port 8084)
+├── ui/                          # Web UI (Mesop)
+│   ├── pages/                  # UI pages
+│   │   ├── home.py             # Story assignment form
+│   │   ├── status.py           # Workflow progress
+│   │   └── article.py          # Article viewer
+│   ├── services/               # UI services
+│   │   └── news_chief_client.py # API client
+│   └── state/                  # UI state management
+│       └── app_state.py        # Application state
 ├── scripts/                     # Utility scripts
 │   └── create_elasticsearch_index.py
 ├── tests/                       # Test suite
 │   ├── test_newsroom_workflow.py    # End-to-end workflow test
-│   └── test_elasticsearch_index.py  # ES index creation test
+│   ├── test_elasticsearch_index.py  # ES index creation test
+│   └── test_archivist.py            # Archivist connectivity test
 ├── docs/                        # Documentation
 │   ├── configuration-guide.md   # Environment setup
 │   ├── elasticsearch-schema.md  # Index mapping
@@ -127,6 +166,7 @@ elastic-news/
 ├── articles/                    # Published articles (auto-generated)
 ├── logs/                        # Agent logs (auto-generated)
 ├── start_newsroom.sh            # Start/stop all agents
+├── start_ui.sh                  # Start UI only
 ├── requirements.txt             # Python dependencies
 ├── env.example                  # Environment template
 └── README.md                    # This file
@@ -138,12 +178,16 @@ elastic-news/
 
 - **Multi-Agent Coordination**: 5 agents communicate via A2A protocol
 - **Complete Workflow**: End-to-end article production from assignment to publication
-- **Elasticsearch Integration**: Historical article indexing and search
-- **External Agent Integration**: Optional Archivist agent via A2A protocol
+- **Web UI**: Interactive story assignment, real-time status tracking, and article viewing (port 3000)
+- **Elasticsearch Integration**: Historical article indexing and search via `news_archive` index
+- **Elastic Archivist Integration**: Cloud-based search agent via Conversational API
 - **Claude Sonnet 4**: AI-powered research, writing, and editing
 - **Process Management**: Single command to start/stop all agents
-- **Comprehensive Logging**: Individual log files for each agent
-- **Hot Reload Support**: Development mode with auto-reload
+- **Comprehensive Logging**: Individual log files for each agent with detailed diagnostics
+- **Hot Reload Support**: Development mode with auto-reload for agents and UI
+- **Article Data Flow**: Structured article data (headline, content, word count) passed through workflow
+- **Status Page**: Real-time workflow progress with manual refresh
+- **Archivist Diagnostics**: Standalone test tool to verify Elastic Cloud connectivity
 
 🔄 **In Progress**
 
@@ -161,19 +205,48 @@ elastic-news/
 ## Workflow Example
 
 ```
-News Chief assigns story → Researcher gathers data →
-Reporter writes article (consults Archivist) →
-Editor reviews and refines → Publisher indexes to Elasticsearch
+User submits story via Web UI (http://localhost:3000)
+    ↓
+News Chief assigns story to Reporter
+    ↓
+Reporter delegates to Researcher for background information
+    ↓
+Researcher returns structured research data (5 key questions/answers)
+    ↓
+Reporter consults Archivist via Elastic Conversational API
+  - Archivist searches news_archive index
+  - Returns historical article highlights and references
+    ↓
+Reporter writes article integrating research + historical context
+  - Generates headline, content, and word count
+    ↓
+Editor reviews article for quality and SEO
+  - Checks word count, grammar, tone
+  - Generates tags and metadata
+    ↓
+Publisher indexes article to Elasticsearch + saves markdown file
+    ↓
+User views completed article in Web UI
 ```
 
 ## Commands
 
 ### Start/Stop Agents
 ```bash
-./start_newsroom.sh           # Start all agents
-./start_newsroom.sh --reload  # Start with hot reload
-./start_newsroom.sh --stop    # Stop all agents
+./start_newsroom.sh                      # Start all agents
+./start_newsroom.sh --reload             # Start agents with hot reload
+./start_newsroom.sh --with-ui            # Start agents + web UI
+./start_newsroom.sh --with-ui --reload   # Start agents + UI with hot reload
+./start_newsroom.sh --stop               # Stop all agents and UI
 ```
+
+### Web UI
+```bash
+./start_ui.sh                    # Start UI only (agents must be running)
+open http://localhost:3000       # Open UI in browser
+```
+
+**Hot Reload:** The UI has hot reload enabled by default (Mesop feature). Changes to `ui/` files reload automatically.
 
 ### View Logs
 ```bash
@@ -185,6 +258,7 @@ tail -f logs/News_Chief.log   # Specific agent
 ```bash
 python tests/test_newsroom_workflow.py    # End-to-end workflow
 python tests/test_elasticsearch_index.py  # Elasticsearch index test
+python test_archivist.py                  # Archivist connectivity and API test
 ```
 
 ### Individual Agents
@@ -205,13 +279,42 @@ Each agent exposes its capabilities via agent card:
 - Researcher: `http://localhost:8083/.well-known/agent-card.json`
 - Publisher: `http://localhost:8084/.well-known/agent-card.json`
 
+## Archivist Integration
+
+The Reporter agent integrates with an Elastic Cloud Archivist agent to search historical articles:
+
+**API Endpoint**: `POST /api/agent_builder/converse`
+
+**Request Format**:
+```json
+{
+  "input": "Find historical news articles about: {search_query}",
+  "agent_id": "archive-agent"
+}
+```
+
+**Required Headers**:
+- `Authorization: ApiKey {ELASTIC_ARCHIVIST_API_KEY}`
+- `Content-Type: application/json`
+- `kbn-xsrf: true`
+
+**Response**: Multi-step conversational response with:
+- Reasoning steps (agent's thought process)
+- Tool calls (`platform.core.search` on `news_archive` index)
+- Article results with highlights and references
+- Conversation ID for follow-up queries
+
+**Diagnostics**: Run `python test_archivist.py` to verify connectivity and test search functionality.
+
 ## Technology Stack
 
 - **A2A SDK**: v0.3.8 ([a2a-python](https://github.com/a2aproject/a2a-python))
 - **AI Model**: Anthropic Claude Sonnet 4
-- **Search**: Elastic Serverless
-- **Web Framework**: Starlette (via A2A SDK)
+- **Search**: Elastic Serverless (Elastic Cloud)
+- **Archivist API**: Elastic Conversational API (`/agent_builder/converse`)
+- **Web Framework**: Starlette (via A2A SDK) + Mesop (UI)
 - **Server**: Uvicorn ASGI server
+- **HTTP Client**: httpx (async)
 - **Language**: Python 3.10+
 
 ## License

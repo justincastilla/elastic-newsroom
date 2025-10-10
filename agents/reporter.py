@@ -36,17 +36,10 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
+from utils import setup_logger
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [REPORTER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')  # Append mode
-    ],
-    force=True  # Override any existing logging config
-)
-logger = logging.getLogger(__name__)
+# Configure logging using centralized utility
+logger = setup_logger("REPORTER")
 
 
 class ReporterAgent:
@@ -234,15 +227,18 @@ class ReporterAgent:
                 else:
                     logger.warning(f"⚠️  Research request failed: {research_response.get('message')}")
 
-                # Process Archivist response
+                # Process Archivist response - it's REQUIRED, so fail if it errors
                 if isinstance(archive_response, Exception):
-                    logger.error(f"❌ Archivist failed: {archive_response}")
+                    logger.error(f"❌ CRITICAL: Archivist failed - this is a required component")
+                    raise archive_response
                 elif archive_response.get("status") == "success":
                     archive_results = archive_response.get("articles", [])
                     self.archive_data[story_id] = archive_results
                     logger.info(f"✅ Received archive data: {len(archive_results)} historical articles")
                 else:
-                    logger.warning(f"⚠️  Archive request failed: {archive_response.get('message')}")
+                    error_msg = f"Archivist request failed: {archive_response.get('message')}"
+                    logger.error(f"❌ CRITICAL: {error_msg}")
+                    raise Exception(error_msg)
             else:
                 logger.info("ℹ️  No research questions needed for this article")
 
@@ -273,6 +269,44 @@ class ReporterAgent:
             logger.info(f"   Word count: {draft['word_count']}")
             logger.info(f"   Total drafts: {len(self.drafts)}")
 
+            # Automatically continue workflow: submit to Editor
+            logger.info("📤 Automatically submitting draft to Editor...")
+            editor_response = await self._send_to_editor(draft)
+
+            if editor_response.get("status") == "success":
+                logger.info(f"✅ Editor review received")
+
+                # Apply edits (which will also publish)
+                logger.info("✏️  Applying editorial suggestions...")
+                edit_response = await self._apply_edits({"story_id": story_id})
+
+                if edit_response.get("status") == "success":
+                    logger.info(f"✅ Full workflow completed - article published!")
+
+                    # Extract headline from article content
+                    lines = article_content.strip().split('\n')
+                    headline = next((line.strip() for line in lines if line.strip() and not line.strip().startswith('#')), "Untitled Article")
+
+                    return {
+                        "status": "success",
+                        "message": "Article completed and published",
+                        "story_id": story_id,
+                        "word_count": draft["word_count"],
+                        "preview": article_content[:200] + "..." if len(article_content) > 200 else article_content,
+                        "published": True,
+                        "publisher_response": edit_response.get("publisher_response"),
+                        "article_data": {
+                            "headline": headline,
+                            "content": article_content,
+                            "word_count": draft["word_count"]
+                        }
+                    }
+                else:
+                    logger.warning(f"⚠️  Failed to apply edits: {edit_response.get('message')}")
+            else:
+                logger.warning(f"⚠️  Editor review failed: {editor_response.get('message')}")
+
+            # Fallback: return draft completion if workflow didn't complete
             return {
                 "status": "success",
                 "message": "Article draft completed",
@@ -414,6 +448,7 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
             search_query = f"{topic} {angle}".strip()
 
             logger.info(f"🔍 Discovering Archivist agent at {self.archivist_url}")
+            logger.info(f"   Search query: '{search_query}'")
 
             # Create headers with API key if available
             headers = {}
@@ -421,82 +456,131 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
                 # Elastic Cloud uses ApiKey auth format, not Bearer
                 headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
                 logger.info(f"🔑 Using API key authentication for Archivist")
+                logger.info(f"   API Key (masked): {self.archivist_api_key[:20]}...{self.archivist_api_key[-10:]}")
             else:
                 logger.warning("⚠️  ELASTIC_ARCHIVIST_API_KEY not set - request may fail")
 
-            async with httpx.AsyncClient(timeout=60.0, headers=headers) as http_client:
-                # Fetch Archivist agent card directly (URL already points to agent card)
-                logger.info(f"📥 Fetching agent card from: {self.archivist_url}")
-                card_response = await http_client.get(self.archivist_url)
-                card_response.raise_for_status()
-                card_data = card_response.json()
-                archivist_card = AgentCard(**card_data)
-                logger.info(f"✅ Found Archivist: {archivist_card.name} (v{archivist_card.version})")
+            # Use Elastic Conversational API instead of A2A protocol
+            # Build converse endpoint URL from agent card URL
+            # From: https://.../api/agent_builder/a2a/archive-agent.json
+            # To:   https://.../api/agent_builder/converse
+            base_url = self.archivist_url.replace("/agent_builder/a2a/archive-agent.json", "")
+            converse_url = f"{base_url}/agent_builder/converse"
 
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client for Archivist...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                archivist_client = client_factory.create(archivist_card)
+            logger.info(f"🌐 Using Elastic Conversational API: {converse_url}")
 
-                # Send search query to Archivist (using platform.core.search skill)
-                # The Archivist accepts text/plain input for searches
-                message = create_text_message_object(content=search_query)
+            # Add required Kibana header
+            headers["Content-Type"] = "application/json"
+            headers["kbn-xsrf"] = "true"
 
-                logger.info(f"📨 Sending A2A message to Archivist:")
+            # Use longer timeout for Archivist (cloud-based, LLM processing may be slow)
+            logger.info(f"⏱️  Setting timeout to 120 seconds for Archivist request")
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                # Build conversational request
+                converse_request = {
+                    "input": f"Find historical news articles about: {search_query}",
+                    "agent_id": "archive-agent"
+                }
+
+                logger.info(f"📨 Sending conversational request to Archivist:")
                 logger.info(f"   Story ID: {story_id}")
                 logger.info(f"   Search Query: {search_query}")
 
                 # Get response
+                import time
+                start_time = time.time()
                 logger.info(f"⏳ Waiting for Archivist response...")
-                response_count = 0
-                async for response in archivist_client.send_message(message):
-                    response_count += 1
-                    logger.info(f"📥 Received response chunk #{response_count} from Archivist")
-                    logger.info(f"   Response type: {type(response)}")
-                    logger.info(f"   Has parts: {hasattr(response, 'parts')}")
+                logger.info(f"   Request started at: {time.strftime('%H:%M:%S')}")
 
-                    if hasattr(response, 'parts'):
-                        logger.info(f"   Number of parts: {len(response.parts)}")
-                        if len(response.parts) > 0:
-                            part = response.parts[0]
-                            logger.info(f"   Part type: {type(part)}")
-                            logger.info(f"   Part has root: {hasattr(part, 'root')}")
+                response = await http_client.post(
+                    converse_url,
+                    json=converse_request,
+                    headers=headers
+                )
 
-                            text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-                            logger.info(f"   Text content: {text_content[:200] if text_content else 'None'}")
+                elapsed = time.time() - start_time
+                logger.info(f"📥 Received response in {elapsed:.1f} seconds")
+                logger.info(f"   Status Code: {response.status_code}")
 
-                            if text_content:
-                                # Parse the response - it may be text or JSON
-                                try:
-                                    result = json.loads(text_content)
-                                except json.JSONDecodeError:
-                                    # If not JSON, treat as text summary
-                                    result = {"summary": text_content, "articles": []}
+                response.raise_for_status()
+                result = response.json()
 
-                                logger.info(f"📬 Received A2A response from Archivist")
-                                logger.info(f"   Response length: {len(text_content)} chars")
+                # Extract articles from Elastic conversational response
+                articles = []
+                full_response = ""
 
-                                return {
-                                    "status": "success",
-                                    "query": search_query,
-                                    "response": text_content,
-                                    "articles": result.get("articles", []) if isinstance(result, dict) else []
-                                }
-                        else:
-                            logger.warning("⚠️  Response has parts but parts list is empty")
-                    else:
-                        logger.warning("⚠️  Response does not have parts attribute")
+                # Process steps to extract tool results
+                if "steps" in result:
+                    for step in result["steps"]:
+                        if step.get("type") == "reasoning":
+                            logger.info(f"💭 Archivist reasoning: {step.get('reasoning', '')[:200]}")
 
-                logger.warning(f"⚠️  No response content from Archivist (received {response_count} chunks)")
-                return {"status": "error", "message": "No response from Archivist"}
+                        if step.get("type") == "tool_call" and "results" in step:
+                            logger.info(f"🔧 Tool used: {step.get('tool_id')}")
+                            logger.info(f"   Tool params: {step.get('params')}")
+
+                            # Extract article data from results
+                            for result_item in step["results"]:
+                                if result_item.get("type") == "resource":
+                                    data = result_item.get("data", {})
+                                    content = data.get("content", {})
+                                    reference = data.get("reference", {})
+
+                                    # Build article object
+                                    article = {
+                                        "id": reference.get("id"),
+                                        "index": reference.get("index"),
+                                        "highlights": content.get("highlights", []),
+                                        "content": content.get("content", "")
+                                    }
+                                    articles.append(article)
+
+                        if step.get("type") == "message" and "message" in step:
+                            full_response = step["message"]
+
+                logger.info(f"")
+                logger.info(f"📚 ARCHIVIST SEARCH RESULTS:")
+                logger.info(f"   🔍 Search Query: {search_query}")
+                logger.info(f"   📊 Found {len(articles)} historical articles")
+
+                if articles:
+                    logger.info(f"   📰 Article References:")
+                    for i, article in enumerate(articles[:10], 1):
+                        article_id = article.get('id', 'Unknown')
+                        highlights = article.get('highlights', [])
+                        preview = highlights[0][:100] if highlights else "No preview"
+                        logger.info(f"      {i}. {article_id}: {preview}...")
+
+                    if len(articles) > 10:
+                        logger.info(f"      ... and {len(articles) - 10} more articles")
+                else:
+                    logger.info(f"   ℹ️  No historical articles found for this query")
+                logger.info(f"")
+
+                return {
+                    "status": "success",
+                    "query": search_query,
+                    "response": full_response,
+                    "articles": articles,
+                    "conversation_id": result.get("conversation_id")
+                }
 
         except Exception as e:
-            logger.error(f"Failed to send archive request to Archivist: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to contact Archivist: {str(e)}"
-            }
+            import time
+            elapsed = time.time() - start_time if 'start_time' in locals() else 0
+            error_msg = str(e)
+
+            if "Timeout" in error_msg or "timeout" in error_msg:
+                logger.error(f"❌ CRITICAL: Archivist request timed out")
+                logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
+                logger.error(f"   Archivist URL: {self.archivist_url}")
+                logger.error(f"   The Archivist is a required component - workflow cannot continue without it")
+            else:
+                logger.error(f"❌ CRITICAL: Failed to send archive request to Archivist: {e}", exc_info=True)
+                logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
+
+            # Re-raise the exception to halt the workflow
+            raise Exception(f"Archivist request failed: {str(e)}") from e
 
     async def _send_to_publisher(self, story_id: str) -> Dict[str, Any]:
         """Send finalized article to Publisher agent via A2A"""

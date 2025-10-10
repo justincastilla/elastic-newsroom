@@ -31,17 +31,10 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
+from utils import setup_logger
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [PUBLISHER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+# Configure logging using centralized utility
+logger = setup_logger("PUBLISHER")
 
 
 class PublisherAgent:
@@ -169,27 +162,32 @@ class PublisherAgent:
         build_number = f"#{int(time.time()) % 10000}"
         logger.info(f"✅ [MOCK CI/CD] Build {build_number} completed successfully")
 
+        # ALWAYS save to local file first (fallback if Elasticsearch fails)
+        logger.info(f"💾 Saving article to local file...")
+        file_path = await self._save_article_to_file(article_data, tags, categories)
+        logger.info(f"✅ Article saved to: {file_path}")
+
         # Index to Elasticsearch - CRITICAL STEP
+        es_success = False
+        es_response = None
         logger.info(f"📊 Indexing article to Elasticsearch ({self.es_index})...")
         try:
-            response = self.es_client.index(
+            es_response = self.es_client.index(
                 index=self.es_index,
                 id=story_id,  # Use story_id as document ID
                 document=es_document
             )
             logger.info(f"✅ Article indexed to Elasticsearch")
-            logger.info(f"   Index: {response['_index']}")
-            logger.info(f"   ID: {response['_id']}")
-            logger.info(f"   Result: {response['result']}")
+            logger.info(f"   Index: {es_response['_index']}")
+            logger.info(f"   ID: {es_response['_id']}")
+            logger.info(f"   Result: {es_response['result']}")
+            es_success = True
 
         except Exception as e:
-            logger.error(f"❌ CRITICAL: Failed to index to Elasticsearch: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to index article to Elasticsearch: {str(e)}",
-                "story_id": story_id,
-                "stage": "elasticsearch_indexing"
-            }
+            logger.error(f"❌ Elasticsearch indexing failed: {e}", exc_info=True)
+            logger.warning(f"⚠️  Article saved to local file but NOT indexed to Elasticsearch")
+            # Don't return error - continue with local file publication
+            es_success = False
 
         # Mock CI/CD - Step 2: Deploy
         logger.info("🚀 [MOCK CI/CD] Deploying to production...")
@@ -211,35 +209,48 @@ class PublisherAgent:
             "story_id": story_id,
             "headline": article_data.get("headline"),
             "published_at": datetime.now().isoformat(),
-            "es_index": self.es_index,
-            "es_document_id": response['_id'],
+            "file_path": file_path,
+            "es_index": self.es_index if es_success else None,
+            "es_document_id": es_response['_id'] if es_success else None,
             "build_number": build_number,
             "deployment_url": f"https://newsroom.example.com/articles/{article_data.get('url_slug', story_id)}",
             "subscribers_notified": subscriber_count,
             "tags": tags,
-            "categories": categories
+            "categories": categories,
+            "elasticsearch_indexed": es_success
         }
         self.published_articles[story_id] = publication_record
 
-        logger.info(f"✅ Publication workflow completed successfully")
+        if es_success:
+            logger.info(f"✅ Publication workflow completed successfully (Elasticsearch + Local File)")
+        else:
+            logger.info(f"✅ Publication workflow completed (Local File Only - Elasticsearch indexing failed)")
         logger.info(f"   Total published articles: {len(self.published_articles)}")
 
-        return {
+        result = {
             "status": "success",
             "message": f"Article '{article_data.get('headline')}' published successfully",
             "story_id": story_id,
             "published_at": publication_record["published_at"],
-            "elasticsearch": {
-                "index": self.es_index,
-                "document_id": response['_id'],
-                "result": response['result']
-            },
+            "file_path": file_path,
             "build_number": build_number,
             "deployment_url": publication_record["deployment_url"],
             "subscribers_notified": subscriber_count,
             "tags": tags,
             "categories": categories
         }
+
+        # Include Elasticsearch info only if successful
+        if es_success:
+            result["elasticsearch"] = {
+                "index": self.es_index,
+                "document_id": es_response['_id'],
+                "result": es_response['result']
+            }
+        else:
+            result["elasticsearch_warning"] = "Article not indexed to Elasticsearch (saved to local file only)"
+
+        return result
 
     async def _unpublish_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Unpublish article from Elasticsearch (set status to unpublished)"""
@@ -360,6 +371,55 @@ Return ONLY the JSON, no additional text."""
             logger.error(f"❌ Failed to generate tags/categories: {e}")
             return [], []
 
+    async def _save_article_to_file(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> str:
+        """Save article to local markdown file"""
+        story_id = article_data.get("story_id")
+        topic = article_data.get("topic", "article")
+        content = article_data.get("content", "")
+        headline = article_data.get("headline", "Untitled")
+
+        # Create articles directory if it doesn't exist
+        articles_dir = "articles"
+        os.makedirs(articles_dir, exist_ok=True)
+
+        # Generate filename from topic and story_id
+        filename = topic.lower().replace(" ", "-").replace(":", "").replace(",", "")
+        filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_'))
+        filepath = os.path.join(articles_dir, f"{filename}-{story_id}.md")
+
+        # Build markdown content with metadata
+        markdown_content = f"""---
+title: {topic}
+story_id: {story_id}
+headline: {headline}
+author: Elastic News Reporter Agent
+date: {datetime.now().strftime('%Y-%m-%d')}
+word_count: {article_data.get('word_count')}
+tags: {', '.join(tags)}
+categories: {', '.join(categories)}
+---
+
+{content}
+
+---
+
+**Article Metadata:**
+- Story ID: {story_id}
+- Published: {datetime.now().isoformat()}
+- Word Count: {article_data.get('word_count')}
+- Tags: {', '.join(tags)}
+- Categories: {', '.join(categories)}
+
+*Generated by Elastic News - A Multi-Agent AI Newsroom*
+*Powered by Anthropic Claude Sonnet 4 and A2A Protocol*
+"""
+
+        # Write to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+
+        return filepath
+
     def _build_es_document(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> Dict[str, Any]:
         """Build Elasticsearch document from article data"""
 
@@ -387,7 +447,6 @@ Return ONLY the JSON, no additional text."""
             "published_at": article_data.get("published_at") or datetime.now().isoformat(),
             "created_at": article_data.get("created_at"),
             "updated_at": datetime.now().isoformat(),
-            "deadline": article_data.get("deadline"),
             "author": article_data.get("author", "Reporter Agent"),
             "editor": article_data.get("editor", "Editor Agent"),
             "tags": tags,
