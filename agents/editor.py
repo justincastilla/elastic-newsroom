@@ -13,24 +13,16 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
-import uvicorn
-from anthropic import Anthropic
-from dotenv import dotenv_values
-
-# Also get values directly as a backup
-env_config = dotenv_values('.env')
-if env_config:
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from utils import setup_logger
+from utils import setup_logger, load_env_config, init_anthropic_client, extract_json_from_llm_response, run_agent_server
+
+# Load environment variables
+load_env_config()
 
 # Configure logging using centralized utility
 logger = setup_logger("EDITOR")
@@ -42,15 +34,9 @@ class EditorAgent:
     def __init__(self):
         self.reviews: Dict[str, Dict[str, Any]] = {}
         self.drafts_under_review: Dict[str, Dict[str, Any]] = {}
-        self.anthropic_client = None
-
-        # Initialize Anthropic client if API key is available
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-            logger.info("✅ Anthropic client initialized")
-        else:
-            logger.warning("⚠️  ANTHROPIC_API_KEY not set - will use mock reviews")
+        
+        # Initialize Anthropic client using centralized utility
+        self.anthropic_client = init_anthropic_client(logger)
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -250,57 +236,16 @@ Provide only the JSON response, no additional text."""
                     }]
                 )
 
-                # Parse the JSON response with robust extraction
+                # Parse the JSON response using centralized utility
                 review_text = message.content[0].text
-
-                # Try to extract JSON if there's any markdown formatting
-                if "```json" in review_text:
-                    review_text = review_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in review_text:
-                    review_text = review_text.split("```")[1].split("```")[0].strip()
-
-                # Try to find JSON object boundaries if still contains extra text
-                if not review_text.startswith("{"):
-                    # Find first { and last }
-                    start_idx = review_text.find("{")
-                    end_idx = review_text.rfind("}")
-                    if start_idx != -1 and end_idx != -1:
-                        review_text = review_text[start_idx:end_idx + 1]
-
-                # Attempt to parse JSON
-                try:
-                    return json.loads(review_text)
-                except json.JSONDecodeError as json_err:
-                    logger.error(f"JSON parsing failed: {json_err}")
-                    logger.error(f"Full JSON response length: {len(review_text)} chars")
-                    logger.error(f"Problematic JSON text (first 1000 chars): {review_text[:1000]}")
-
-                    # Try to fix common JSON issues
-                    # 1. Remove trailing commas before closing brackets/braces
-                    review_text = re.sub(r',(\s*[}\]])', r'\1', review_text)
-
-                    # 2. Escape unescaped quotes within strings (common in location/suggestion fields)
-                    # This is tricky - just log it for now
-
-                    # 3. Check if JSON is truncated - if it doesn't end with }, try to close it
-                    review_text = review_text.strip()
-                    if not review_text.endswith('}'):
-                        logger.warning(f"JSON appears truncated, ends with: {review_text[-50:]}")
-                        # Count open braces and brackets
-                        open_braces = review_text.count('{') - review_text.count('}')
-                        open_brackets = review_text.count('[') - review_text.count(']')
-
-                        # Try to close them
-                        logger.info(f"Attempting to close: {open_brackets} unclosed arrays, {open_braces} unclosed objects")
-                        review_text += ']' * open_brackets
-                        review_text += '}' * open_braces
-
-                    try:
-                        return json.loads(review_text)
-                    except json.JSONDecodeError as repair_err:
-                        logger.error(f"JSON repair failed: {repair_err}")
-                        logger.error(f"After repair (last 200 chars): {review_text[-200:]}")
-                        return self._generate_mock_review(current_word_count, target_length)
+                review_data = extract_json_from_llm_response(review_text, logger)
+                
+                if review_data:
+                    return review_data
+                else:
+                    # If JSON extraction failed, return mock review
+                    logger.warning("Failed to extract JSON from LLM response, returning mock review")
+                    return self._generate_mock_review(current_word_count, target_length)
 
             except Exception as e:
                 logger.error(f"Anthropic API error: {e}", exc_info=True)
@@ -496,30 +441,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Editor Agent server."""
-    try:
-        logger.info(f'Starting Editor Agent server on {host}:{port}')
-        print(f"✏️  Editor Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.editor:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Editor",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.editor:app" if reload else None
+    )
 
 
 if __name__ == "__main__":
