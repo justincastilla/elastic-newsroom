@@ -8,6 +8,7 @@ Uses Anthropic Claude for AI-powered content generation.
 import json
 import logging
 import os
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -416,155 +417,217 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
             }
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for historical articles via Archivist agent (Elastic cloud)"""
-        try:
-            # Check if Archivist URL is configured
-            if not self.archivist_url:
-                logger.warning("⚠️  ELASTIC_ARCHIVIST_AGENT_CARD_URL not set - skipping archive search")
-                return {
-                    "status": "skipped",
-                    "message": "Archivist agent card URL not configured"
+        """Search for historical articles via Archivist agent using A2A protocol"""
+        import time
+
+        # Check if Archivist URL is configured
+        if not self.archivist_url:
+            logger.warning("⚠️  ELASTIC_ARCHIVIST_AGENT_CARD_URL not set - skipping archive search")
+            return {
+                "status": "skipped",
+                "message": "Archivist agent card URL not configured"
+            }
+
+        # Build search query from topic and angle
+        topic = assignment.get("topic", "")
+        angle = assignment.get("angle", "")
+        search_query = f"Find articles about {topic} {angle}".strip()
+
+        logger.info(f"🔍 Connecting to Archivist agent at {self.archivist_url}")
+        logger.info(f"   Search query: '{search_query}'")
+
+        # Extract base URL and agent ID from the agent card URL
+        # Example URL: https://gemini-searchlabs-f15e57.kb.us-central1.gcp.elastic.cloud/api/agent_builder/a2a/elastic-ai-agent
+        # We need the base URL + /api/agent_builder/a2a/ + agent_id
+        if "/api/agent_builder/a2a/" in self.archivist_url:
+            # Extract agent_id from URL (last segment)
+            agent_id = self.archivist_url.split("/")[-1]
+            # Remove .json extension if present
+            if agent_id.endswith(".json"):
+                agent_id = agent_id[:-5]
+            a2a_endpoint = self.archivist_url.replace(f"/{agent_id}.json", f"/{agent_id}").replace(f"/{agent_id}", f"/{agent_id}")
+        else:
+            logger.error(f"❌ Invalid Archivist URL format: {self.archivist_url}")
+            raise Exception(f"Invalid Archivist URL format. Expected format: https://.../api/agent_builder/a2a/agent-id")
+
+        # Create headers with API key
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        if self.archivist_api_key:
+            headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
+            logger.info(f"🔑 Using API key authentication")
+            logger.info(f"   API Key (masked): {self.archivist_api_key[:20]}...{self.archivist_api_key[-10:]}")
+        else:
+            logger.warning("⚠️  ELASTIC_ARCHIVIST_API_KEY not set - request may fail")
+
+        # Retry logic: up to 3 attempts if response is empty
+        max_attempts = 3
+        attempt = 0
+
+        while attempt < max_attempts:
+            attempt += 1
+
+            try:
+                # Generate unique message ID for this request
+                message_id = f"msg-{int(time.time() * 1000)}-{story_id[:8]}-{attempt}"
+
+                # Build A2A protocol request
+                a2a_request = {
+                    "id": message_id,
+                    "jsonrpc": "2.0",
+                    "method": "message/send",
+                    "params": {
+                        "configuration": {
+                            "acceptedOutputModes": ["text/plain", "video/mp4"]
+                        },
+                        "message": {
+                            "kind": "message",
+                            "messageId": message_id,
+                            "metadata": {},
+                            "parts": [
+                                {
+                                    "kind": "text",
+                                    "text": search_query
+                                }
+                            ],
+                            "role": "user"
+                        }
+                    }
                 }
 
-            # Build search query from topic and angle
-            topic = assignment.get("topic", "")
-            angle = assignment.get("angle", "")
-            search_query = f"{topic} {angle}".strip()
-
-            logger.info(f"🔍 Discovering Archivist agent at {self.archivist_url}")
-            logger.info(f"   Search query: '{search_query}'")
-
-            # Create headers with API key if available
-            headers = {}
-            if self.archivist_api_key:
-                # Elastic Cloud uses ApiKey auth format, not Bearer
-                headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
-                logger.info(f"🔑 Using API key authentication for Archivist")
-                logger.info(f"   API Key (masked): {self.archivist_api_key[:20]}...{self.archivist_api_key[-10:]}")
-            else:
-                logger.warning("⚠️  ELASTIC_ARCHIVIST_API_KEY not set - request may fail")
-
-            # Use Elastic Conversational API instead of A2A protocol
-            # Build converse endpoint URL from agent card URL
-            # From: https://.../api/agent_builder/a2a/archive-agent.json
-            # To:   https://.../api/agent_builder/converse
-            base_url = self.archivist_url.replace("/agent_builder/a2a/archive-agent.json", "")
-            converse_url = f"{base_url}/agent_builder/converse"
-
-            logger.info(f"🌐 Using Elastic Conversational API: {converse_url}")
-
-            # Add required Kibana header
-            headers["Content-Type"] = "application/json"
-            headers["kbn-xsrf"] = "true"
-
-            # Use longer timeout for Archivist (cloud-based, LLM processing may be slow)
-            logger.info(f"⏱️  Setting timeout to 120 seconds for Archivist request")
-            async with httpx.AsyncClient(timeout=120.0) as http_client:
-                # Build conversational request
-                converse_request = {
-                    "input": f"Find historical news articles about: {search_query}",
-                    "agent_id": "archive-agent"
-                }
-
-                logger.info(f"📨 Sending conversational request to Archivist:")
+                logger.info(f"📨 Sending A2A request to Archivist (attempt {attempt}/{max_attempts}):")
                 logger.info(f"   Story ID: {story_id}")
+                logger.info(f"   Message ID: {message_id}")
                 logger.info(f"   Search Query: {search_query}")
 
-                # Get response
-                import time
+                # Use 30 second timeout as specified
+                logger.info(f"⏱️  Setting timeout to 30 seconds for Archivist request")
                 start_time = time.time()
-                logger.info(f"⏳ Waiting for Archivist response...")
-                logger.info(f"   Request started at: {time.strftime('%H:%M:%S')}")
 
-                response = await http_client.post(
-                    converse_url,
-                    json=converse_request,
-                    headers=headers
-                )
+                async with httpx.AsyncClient(timeout=30.0) as http_client:
+                    logger.info(f"⏳ Waiting for Archivist response...")
+                    logger.info(f"   Request started at: {time.strftime('%H:%M:%S')}")
 
-                elapsed = time.time() - start_time
-                logger.info(f"📥 Received response in {elapsed:.1f} seconds")
-                logger.info(f"   Status Code: {response.status_code}")
+                    response = await http_client.post(
+                        a2a_endpoint,
+                        json=a2a_request,
+                        headers=headers
+                    )
 
-                response.raise_for_status()
-                result = response.json()
+                    elapsed = time.time() - start_time
+                    logger.info(f"📥 Received response in {elapsed:.1f} seconds")
+                    logger.info(f"   Status Code: {response.status_code}")
 
-                # Extract articles from Elastic conversational response
-                articles = []
-                full_response = ""
+                    response.raise_for_status()
+                    result = response.json()
 
-                # Process steps to extract tool results
-                if "steps" in result:
-                    for step in result["steps"]:
-                        if step.get("type") == "reasoning":
-                            logger.info(f"💭 Archivist reasoning: {step.get('reasoning', '')[:200]}")
+                    # Check if response is empty or contains empty result
+                    response_text = response.text.strip()
+                    if not response_text or response_text == '""' or response_text == "":
+                        logger.warning(f"⚠️  Archivist returned empty response (attempt {attempt}/{max_attempts})")
 
-                        if step.get("type") == "tool_call" and "results" in step:
-                            logger.info(f"🔧 Tool used: {step.get('tool_id')}")
-                            logger.info(f"   Tool params: {step.get('params')}")
+                        if attempt < max_attempts:
+                            logger.info(f"🔄 Retrying in 2 seconds...")
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            logger.error(f"❌ CRITICAL: Archivist returned empty response after {max_attempts} attempts")
+                            raise Exception(f"Archivist returned empty response after {max_attempts} attempts")
 
-                            # Extract article data from results
-                            for result_item in step["results"]:
-                                if result_item.get("type") == "resource":
-                                    data = result_item.get("data", {})
-                                    content = data.get("content", {})
-                                    reference = data.get("reference", {})
+                    # Extract articles from A2A response
+                    articles = []
+                    full_response = ""
 
-                                    # Build article object
-                                    article = {
-                                        "id": reference.get("id"),
-                                        "index": reference.get("index"),
-                                        "highlights": content.get("highlights", []),
-                                        "content": content.get("content", "")
-                                    }
-                                    articles.append(article)
+                    # Parse A2A response structure
+                    if "result" in result:
+                        result_data = result["result"]
 
-                        if step.get("type") == "message" and "message" in step:
-                            full_response = step["message"]
+                        # Extract text content from response parts
+                        if "parts" in result_data:
+                            for part in result_data["parts"]:
+                                if part.get("kind") == "text":
+                                    text_content = part.get("text", "")
+                                    full_response += text_content
 
-                logger.info(f"")
-                logger.info(f"📚 ARCHIVIST SEARCH RESULTS:")
-                logger.info(f"   🔍 Search Query: {search_query}")
-                logger.info(f"   📊 Found {len(articles)} historical articles")
+                                    # Try to parse as structured data if it looks like JSON
+                                    if text_content.strip().startswith("{") or text_content.strip().startswith("["):
+                                        try:
+                                            parsed = json.loads(text_content)
+                                            if isinstance(parsed, list):
+                                                articles.extend(parsed)
+                                            elif isinstance(parsed, dict) and "articles" in parsed:
+                                                articles.extend(parsed["articles"])
+                                        except:
+                                            pass
 
-                if articles:
-                    logger.info(f"   📰 Article References:")
-                    for i, article in enumerate(articles[:10], 1):
-                        article_id = article.get('id', 'Unknown')
-                        highlights = article.get('highlights', [])
-                        preview = highlights[0][:100] if highlights else "No preview"
-                        logger.info(f"      {i}. {article_id}: {preview}...")
+                        # Also check for resources in the response
+                        if "resources" in result_data:
+                            for resource in result_data["resources"]:
+                                article = {
+                                    "id": resource.get("id", "unknown"),
+                                    "content": resource.get("text", ""),
+                                    "metadata": resource.get("metadata", {})
+                                }
+                                articles.append(article)
 
-                    if len(articles) > 10:
-                        logger.info(f"      ... and {len(articles) - 10} more articles")
+                    logger.info(f"")
+                    logger.info(f"📚 ARCHIVIST SEARCH RESULTS:")
+                    logger.info(f"   🔍 Search Query: {search_query}")
+                    logger.info(f"   📊 Found {len(articles)} historical articles")
+                    logger.info(f"   📝 Response length: {len(full_response)} characters")
+
+                    if articles:
+                        logger.info(f"   📰 Article References:")
+                        for i, article in enumerate(articles[:10], 1):
+                            article_id = article.get('id', 'Unknown')
+                            content = article.get('content', '')
+                            preview = content[:100] if content else "No content"
+                            logger.info(f"      {i}. {article_id}: {preview}...")
+
+                        if len(articles) > 10:
+                            logger.info(f"      ... and {len(articles) - 10} more articles")
+                    else:
+                        logger.info(f"   ℹ️  No historical articles found (but got text response)")
+                    logger.info(f"")
+
+                    return {
+                        "status": "success",
+                        "query": search_query,
+                        "response": full_response,
+                        "articles": articles,
+                        "message_id": message_id,
+                        "attempts": attempt
+                    }
+
+            except Exception as e:
+                elapsed = time.time() - start_time if 'start_time' in locals() else 0
+                error_msg = str(e)
+
+                if "Timeout" in error_msg or "timeout" in error_msg:
+                    logger.error(f"❌ Archivist request timed out (attempt {attempt}/{max_attempts})")
+                    logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
+
+                    if attempt < max_attempts:
+                        logger.info(f"🔄 Retrying in 2 seconds...")
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        logger.error(f"❌ CRITICAL: Archivist timed out after {max_attempts} attempts")
+                        logger.error(f"   Archivist URL: {self.archivist_url}")
+                        raise Exception(f"Archivist request timed out after {max_attempts} attempts")
                 else:
-                    logger.info(f"   ℹ️  No historical articles found for this query")
-                logger.info(f"")
+                    logger.error(f"❌ CRITICAL: Failed to send request to Archivist (attempt {attempt}/{max_attempts}): {e}", exc_info=True)
+                    logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
 
-                return {
-                    "status": "success",
-                    "query": search_query,
-                    "response": full_response,
-                    "articles": articles,
-                    "conversation_id": result.get("conversation_id")
-                }
-
-        except Exception as e:
-            import time
-            elapsed = time.time() - start_time if 'start_time' in locals() else 0
-            error_msg = str(e)
-
-            if "Timeout" in error_msg or "timeout" in error_msg:
-                logger.error(f"❌ CRITICAL: Archivist request timed out")
-                logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
-                logger.error(f"   Archivist URL: {self.archivist_url}")
-                logger.error(f"   The Archivist is a required component - workflow cannot continue without it")
-            else:
-                logger.error(f"❌ CRITICAL: Failed to send archive request to Archivist: {e}", exc_info=True)
-                logger.error(f"   Elapsed time: {elapsed:.1f} seconds")
-
-            # Re-raise the exception to halt the workflow
-            raise Exception(f"Archivist request failed: {str(e)}") from e
+                    if attempt < max_attempts:
+                        logger.info(f"🔄 Retrying in 2 seconds...")
+                        await asyncio.sleep(2)
+                        continue
+                    else:
+                        # Re-raise the exception to halt the workflow after all attempts
+                        raise Exception(f"Archivist request failed after {max_attempts} attempts: {str(e)}") from e
 
     async def _send_to_publisher(self, story_id: str) -> Dict[str, Any]:
         """Send finalized article to Publisher agent via A2A"""
