@@ -12,6 +12,7 @@ from datetime import datetime
 
 import click
 import httpx
+from starlette.middleware.cors import CORSMiddleware
 
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
@@ -29,10 +30,12 @@ logger = setup_logger("NEWS_CHIEF")
 class NewsChiefAgent:
     """News Chief Agent - Coordinates newsroom workflow and assigns stories"""
 
-    def __init__(self, reporter_url: Optional[str] = None):
+    def __init__(self, reporter_url: Optional[str] = None, editor_url: Optional[str] = None, publisher_url: Optional[str] = None):
         self.active_stories: Dict[str, Dict[str, Any]] = {}
         self.available_reporters: List[str] = []
         self.reporter_url = reporter_url or "http://localhost:8081"
+        self.editor_url = editor_url or "http://localhost:8082"
+        self.publisher_url = publisher_url or "http://localhost:8084"
         self.reporter_client = None
     
     async def invoke(self, query: str) -> Dict[str, Any]:
@@ -46,16 +49,28 @@ class NewsChiefAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"') and not query.startswith('{"action": "get_story_status"') and not query.startswith('{"action": "list_active_stories"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "assign_story", "story": {"topic": query}}
             action = query_data.get("action", "assign_story")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action not in ["get_status", "get_story_status", "list_active_stories"]:
+                logger.info(f"🎯 Action: {action}")
 
             if action == "assign_story":
                 return await self._assign_story(query_data)
+            elif action == "submit_draft":
+                return await self._submit_draft(query_data)
+            elif action == "route_to_editor":
+                return await self._route_to_editor(query_data)
+            elif action == "route_to_reporter":
+                return await self._route_to_reporter(query_data)
+            elif action == "route_to_publisher":
+                return await self._route_to_publisher(query_data)
             elif action == "get_story_status":
                 return await self._get_story_status(query_data)
             elif action == "list_active_stories":
@@ -66,7 +81,7 @@ class NewsChiefAgent:
                 return {
                     "status": "error",
                     "message": f"Unknown action: {action}",
-                    "available_actions": ["assign_story", "get_story_status", "list_active_stories", "register_reporter"]
+                    "available_actions": ["assign_story", "submit_draft", "route_to_editor", "route_to_reporter", "route_to_publisher", "get_story_status", "list_active_stories", "register_reporter"]
                 }
 
         except json.JSONDecodeError as e:
@@ -204,6 +219,268 @@ class NewsChiefAgent:
             "message": f"Reporter {reporter_id} registered successfully",
             "available_reporters": self.available_reporters
         }
+
+    async def _submit_draft(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle draft submission from Reporter"""
+        logger.info("📝 Processing draft submission...")
+        
+        story_id = request.get("story_id")
+        draft = request.get("draft", {})
+        
+        if not story_id or not draft:
+            return {
+                "status": "error",
+                "message": "Missing story_id or draft data"
+            }
+        
+        # Debug: Log all active stories
+        logger.info(f"🔍 Active stories in News Chief: {list(self.active_stories.keys())}")
+        logger.info(f"🔍 Looking for story: {story_id}")
+        
+        if story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        # Update story with draft
+        self.active_stories[story_id]["draft"] = draft
+        self.active_stories[story_id]["status"] = "draft_submitted"
+        self.active_stories[story_id]["updated_at"] = datetime.now().isoformat()
+        
+        logger.info(f"✅ Draft submitted for story {story_id}")
+        logger.info(f"   Word count: {draft.get('word_count', 'N/A')}")
+        
+        # Auto-route to Editor
+        logger.info("🔄 Auto-routing to Editor for review...")
+        return await self._route_to_editor({"story_id": story_id})
+
+    async def _route_to_editor(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story to Editor for review"""
+        logger.info("✏️ Routing story to Editor...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        draft = story.get("draft", {})
+        
+        if not draft:
+            return {
+                "status": "error",
+                "message": "No draft available for review"
+            }
+        
+        # Update story status
+        story["status"] = "under_review"
+        story["updated_at"] = datetime.now().isoformat()
+        
+        # Send to Editor
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Discover Editor agent
+                card_resolver = A2ACardResolver(http_client, self.editor_url)
+                editor_card = await card_resolver.get_agent_card()
+                
+                # Create A2A client
+                client_config = ClientConfig(httpx_client=http_client, streaming=False)
+                client_factory = ClientFactory(client_config)
+                editor_client = client_factory.create(editor_card)
+                
+                # Send review request
+                review_request = {
+                    "action": "review_draft",
+                    "draft": draft
+                }
+                message = create_text_message_object(content=json.dumps(review_request))
+                
+                # Get response
+                async for response in editor_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            review_result = json.loads(text_content)
+                            logger.info(f"✅ Editor review completed")
+                            
+                            # Store review
+                            story["editor_review"] = review_result
+                            story["status"] = "reviewed"
+                            story["updated_at"] = datetime.now().isoformat()
+                            
+                            # Auto-route back to Reporter if revisions needed
+                            if review_result.get("review", {}).get("approval_status") == "needs_minor_revisions":
+                                logger.info("🔄 Auto-routing back to Reporter for revisions...")
+                                return await self._route_to_reporter({"story_id": story_id})
+                            else:
+                                # Ready for publication
+                                logger.info("✅ Story approved, routing to Publisher...")
+                                return await self._route_to_publisher({"story_id": story_id})
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed to Editor",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Editor: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Editor: {str(e)}"
+            }
+
+    async def _route_to_reporter(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story back to Reporter for revisions"""
+        logger.info("📝 Routing story back to Reporter for revisions...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        story["status"] = "needs_revision"
+        story["updated_at"] = datetime.now().isoformat()
+        
+        # Send to Reporter for revisions
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Discover Reporter agent
+                card_resolver = A2ACardResolver(http_client, self.reporter_url)
+                reporter_card = await card_resolver.get_agent_card()
+                
+                # Create A2A client
+                client_config = ClientConfig(httpx_client=http_client, streaming=False)
+                client_factory = ClientFactory(client_config)
+                reporter_client = client_factory.create(reporter_card)
+                
+                # Send revision request
+                revision_request = {
+                    "action": "apply_edits",
+                    "story_id": story_id,
+                    "editor_review": story.get("editor_review", {})
+                }
+                message = create_text_message_object(content=json.dumps(revision_request))
+                
+                # Get response
+                async for response in reporter_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            revision_result = json.loads(text_content)
+                            logger.info(f"✅ Revisions applied")
+                            
+                            # Update story with revised draft
+                            if "draft" in revision_result:
+                                story["draft"] = revision_result["draft"]
+                                story["status"] = "revised"
+                                story["updated_at"] = datetime.now().isoformat()
+                                
+                                # Auto-route to Publisher
+                                logger.info("✅ Revisions complete, routing to Publisher...")
+                                return await self._route_to_publisher({"story_id": story_id})
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed back to Reporter",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Reporter: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Reporter: {str(e)}"
+            }
+
+    async def _route_to_publisher(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story to Publisher for publication"""
+        logger.info("📰 Routing story to Publisher...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        draft = story.get("draft", {})
+        
+        if not draft:
+            return {
+                "status": "error",
+                "message": "No draft available for publication"
+            }
+        
+        # Update story status
+        story["status"] = "publishing"
+        story["updated_at"] = datetime.now().isoformat()
+        
+        # Send to Publisher
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Discover Publisher agent
+                card_resolver = A2ACardResolver(http_client, self.publisher_url)
+                publisher_card = await card_resolver.get_agent_card()
+                
+                # Create A2A client
+                client_config = ClientConfig(httpx_client=http_client, streaming=False)
+                client_factory = ClientFactory(client_config)
+                publisher_client = client_factory.create(publisher_card)
+                
+                # Send publication request
+                publish_request = {
+                    "action": "publish_article",
+                    "article": draft
+                }
+                message = create_text_message_object(content=json.dumps(publish_request))
+                
+                # Get response
+                async for response in publisher_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            publish_result = json.loads(text_content)
+                            logger.info(f"✅ Article published")
+                            
+                            # Update story status
+                            story["status"] = "published"
+                            story["published_at"] = datetime.now().isoformat()
+                            story["updated_at"] = datetime.now().isoformat()
+                            story["publication_result"] = publish_result
+                            
+                            return {
+                                "status": "success",
+                                "message": "Story published successfully",
+                                "story_id": story_id,
+                                "publication_result": publish_result
+                            }
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed to Publisher",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Publisher: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Publisher: {str(e)}"
+            }
 
     async def _trigger_write_async(self, story_id: str):
         """Trigger article writing asynchronously without blocking"""
@@ -391,6 +668,46 @@ def create_agent_card(host: str, port: int) -> AgentCard:
                 ]
             ),
             AgentSkill(
+                id="newsroom.coordination.draft_management",
+                name="Draft Management",
+                description="Handles draft submissions from reporters and routes them through the editorial process",
+                tags=["coordination", "draft-management"],
+                examples=[
+                    '{"action": "submit_draft", "story_id": "story_123", "draft": {...}}',
+                    "Submit a draft for editorial review"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.editorial_routing",
+                name="Editorial Routing",
+                description="Routes stories to Editor for review and manages the editorial workflow",
+                tags=["coordination", "editorial"],
+                examples=[
+                    '{"action": "route_to_editor", "story_id": "story_123"}',
+                    "Route story to Editor for review"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.revision_routing",
+                name="Revision Routing",
+                description="Routes stories back to Reporter for revisions based on editorial feedback",
+                tags=["coordination", "revisions"],
+                examples=[
+                    '{"action": "route_to_reporter", "story_id": "story_123"}',
+                    "Route story back to Reporter for revisions"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.publication_routing",
+                name="Publication Routing",
+                description="Routes approved stories to Publisher for final publication",
+                tags=["coordination", "publication"],
+                examples=[
+                    '{"action": "route_to_publisher", "story_id": "story_123"}',
+                    "Route story to Publisher for publication"
+                ]
+            ),
+            AgentSkill(
                 id="newsroom.coordination.story_status",
                 name="Story Status",
                 description="Retrieves the status of assigned stories",
@@ -436,7 +753,73 @@ def create_app(host='localhost', port=8080):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+    
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    
+    # Add direct HTTP endpoints for React UI
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse
+    
+    async def direct_assign_story(request):
+        """Direct HTTP endpoint for story assignment"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    async def direct_get_story_status(request):
+        """Direct HTTP endpoint for story status"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    async def direct_list_active_stories(request):
+        """Direct HTTP endpoint for listing active stories"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # Add clear endpoint
+    async def clear_all(request):
+        """Clear all stories and reset to idle state"""
+        try:
+            news_chief = get_news_chief_agent()
+            news_chief.active_stories = {}
+            news_chief.story_counter = 0
+            logger.info("🧹 News Chief: Cleared all stories and reset to idle")
+            return {"status": "success", "message": "All stories cleared"}
+        except Exception as e:
+            logger.error(f"Error clearing stories: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    # Add routes
+    app.router.routes.extend([
+        Route("/assign-story", direct_assign_story, methods=["POST"]),
+        Route("/story-status", direct_get_story_status, methods=["POST"]),
+        Route("/active-stories", direct_list_active_stories, methods=["POST"]),
+        Route("/clear-all", clear_all, methods=["POST"]),
+    ])
+    
+    return app
 
 
 # Create default app instance for uvicorn

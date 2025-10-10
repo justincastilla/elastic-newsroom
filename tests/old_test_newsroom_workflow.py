@@ -24,10 +24,13 @@ async def test_newsroom_workflow():
     news_chief_url = "http://localhost:8080"
     reporter_url = "http://localhost:8081"
 
-    # Use longer timeout for Anthropic API calls with research and Archivist
-    # Reporter now: generates outline (8s) + researcher bulk call (15s) + archivist (up to 94s with retries) + writes article (15s) = ~130s
-    # Set timeout to 180 seconds (3 minutes) to be safe
-    async with httpx.AsyncClient(timeout=180.0) as http_client:
+    # No timeout for test - let the workflow complete naturally
+    # The workflow can take varying amounts of time depending on:
+    # - Anthropic API response times
+    # - Archivist retry logic (up to 122s with retries)
+    # - Network conditions
+    # - Agent processing time
+    async with httpx.AsyncClient(timeout=None) as http_client:
 
         # ========================================
         # STEP 1: Connect to News Chief
@@ -142,9 +145,26 @@ async def test_newsroom_workflow():
         # ========================================
         # STEP 5: Tell Reporter to Write Article
         # ========================================
-        print("\n✍️  STEP 5: Reporter Writes Article (Using Anthropic)")
+        print("\n✍️  STEP 5: Reporter Writes Article (Multi-Agent Workflow)")
         print("-" * 60)
-        print("⏳ This may take 10-20 seconds with Anthropic API...")
+        print("⏳ This involves multiple steps:")
+        print("   1. Generate outline and research questions (~8s)")
+        print("   2. Call Researcher + Archivist IN PARALLEL (~20s)")
+        print("      → Researcher: Answers research questions using Anthropic")
+        print("      → Archivist: Searches Elasticsearch for historical articles")
+        print("   3. Generate article with research + archive data (~15s)")
+        print("   4. Submit to Editor for review (~17s)")
+        print("   5. Apply editorial suggestions (~15s)")
+        print("   6. Publish to Elasticsearch (~5s)")
+        print("   Total: Variable (no timeout - let it complete naturally)")
+        print()
+        print("📊 Watch the agent logs to see each step in detail:")
+        print("   - Reporter log: Shows outline generation and article writing")
+        print("   - Researcher log: Shows bulk research processing")
+        print("   - Archivist: Direct HTTP call to Elastic Cloud")
+        print("   - Editor log: Shows editorial review")
+        print("   - Publisher log: Shows tag generation and indexing")
+        print()
 
         request = {
             "action": "write_article",
@@ -152,16 +172,51 @@ async def test_newsroom_workflow():
         }
         message = create_text_message_object(content=json.dumps(request))
 
+        import time
+        start_time = time.time()
+        print(f"⏱️  Started at: {time.strftime('%H:%M:%S')}")
+        print()
+
         async for response in reporter_client.send_message(message):
             if hasattr(response, 'parts'):
                 part = response.parts[0]
                 text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                 if text_content:
                     result = json.loads(text_content)
-                    print(f"\n✅ Article Generated:")
+                    elapsed = time.time() - start_time
+
+                    print(f"\n✅ Article Generation Complete!")
+                    print(f"   ⏱️  Total Time: {elapsed:.1f} seconds")
                     print(f"   Status: {result.get('status')}")
                     print(f"   Word Count: {result.get('word_count')}")
+
+                    # Show if published
+                    if result.get('published'):
+                        print(f"   📰 Published: Yes")
+                        publisher_resp = result.get('publisher_response', {})
+                        if publisher_resp.get('elasticsearch'):
+                            es_info = publisher_resp['elasticsearch']
+                            print(f"   📇 Elasticsearch:")
+                            print(f"      - Index: {es_info.get('index')}")
+                            print(f"      - Document ID: {es_info.get('document_id')}")
+                        if publisher_resp.get('tags'):
+                            print(f"   🏷️  Tags: {', '.join(publisher_resp.get('tags', [])[:5])}")
+                        if publisher_resp.get('categories'):
+                            print(f"   📂 Categories: {', '.join(publisher_resp.get('categories', []))}")
+
                     print(f"   Preview: {result.get('preview', '')[:150]}...")
+                    print()
+                    print("=" * 60)
+                    print("📋 MULTI-AGENT WORKFLOW SUMMARY")
+                    print("=" * 60)
+                    print("✓ Reporter generated outline with research questions")
+                    print("✓ Researcher answered questions in parallel with Archivist")
+                    print("✓ Archivist searched historical articles from Elasticsearch")
+                    print("✓ Reporter wrote article integrating all data")
+                    print("✓ Editor reviewed and provided suggestions")
+                    print("✓ Reporter applied editorial suggestions")
+                    print("✓ Publisher indexed article to Elasticsearch")
+                    print("=" * 60)
 
         # ========================================
         # STEP 6: Reporter Submits Draft to Editor
@@ -298,32 +353,68 @@ async def test_newsroom_workflow():
         print("\n" + "="*60)
         print("🎉 FULL EDITORIAL WORKFLOW COMPLETED SUCCESSFULLY")
         print("="*60)
-        print("\n✅ Demonstrated Complete A2A Agent Chain:")
-        print("   1. Client assigned story to News Chief")
-        print("   2. News Chief sent assignment to Reporter (A2A)")
-        print("   3. Reporter generated outline and research questions (Anthropic)")
-        print("   4. Reporter called Researcher + Archivist in PARALLEL (A2A)")
-        print("   5. Researcher answered all questions in 1 API call (Anthropic)")
-        print("   6. Archivist searched historical articles (Elastic Cloud)")
-        print("   7. Reporter wrote article with research + archive data (Anthropic)")
-        print("   8. Reporter submitted draft to Editor (A2A)")
-        print("   9. Editor reviewed draft (Anthropic: grammar, tone, consistency, length)")
-        print("   10. Editor sent feedback to Reporter (A2A response)")
-        print("   11. Reporter applied editorial suggestions (Anthropic)")
-        print("   12. Reporter automatically sent to Publisher (A2A)")
-        print("   13. Publisher generated tags/categories (Anthropic)")
-        print("   14. Publisher indexed article to Elasticsearch")
-        print("   15. Publisher ran mock CI/CD deployment")
-        print("   16. Publisher sent mock CRM notifications")
-        print("   17. Article published and indexed successfully!")
-        print("\n💡 6 agents total: News Chief, Reporter, Researcher, Archivist, Editor, Publisher")
-        print("💡 All agents communicate via A2A protocol!")
-        print("💡 Researcher + Archivist called in parallel for efficiency!")
-        print("💡 Archivist is hosted on Elastic Cloud (external A2A agent)!")
-        print("💡 Publisher auto-generates tags/categories and indexes to Elasticsearch!")
-        print("💡 Check newsroom.log for detailed message flow!")
+        print("\n✅ Complete Multi-Agent Workflow:")
+        print()
+        print("   📋 STEP 1: Assignment Phase")
+        print("   ├─ Client → News Chief: Story assignment request")
+        print("   └─ News Chief → Reporter: A2A message with story details")
+        print()
+        print("   ✍️  STEP 2: Research & Writing Phase (PARALLEL EXECUTION)")
+        print("   ├─ Reporter → Anthropic: Generate outline + research questions (~8s)")
+        print("   ├─ Reporter → Researcher: A2A request with questions")
+        print("   │  └─ Researcher → Anthropic: Bulk research call (~15s)")
+        print("   ├─ Reporter → Archivist: HTTP POST to Elastic Agent Builder API")
+        print("   │  └─ Archivist → Elasticsearch: Search news_archive index (~20s)")
+        print("   │     • Returns: Historical article highlights and references")
+        print("   │     • Status: REQUIRED (workflow fails if unavailable)")
+        print("   └─ Reporter → Anthropic: Generate article with all data (~15s)")
+        print()
+        print("   ✏️  STEP 3: Editorial Review Phase")
+        print("   ├─ Reporter → Editor: A2A request with draft")
+        print("   │  └─ Editor → Anthropic: Review for grammar/tone/length (~17s)")
+        print("   └─ Editor → Reporter: A2A response with suggestions")
+        print()
+        print("   📰 STEP 4: Revision & Publishing Phase")
+        print("   ├─ Reporter → Anthropic: Apply editorial suggestions (~15s)")
+        print("   ├─ Reporter → Publisher: A2A request with final article")
+        print("   │  ├─ Publisher → Anthropic: Generate tags/categories (~8s)")
+        print("   │  ├─ Publisher → Elasticsearch: Index to news_archive (~2s)")
+        print("   │  ├─ Publisher → CI/CD: Trigger deployment (mock)")
+        print("   │  └─ Publisher → CRM: Send notifications (mock)")
+        print("   └─ Publisher → Reporter: A2A response with confirmation")
+        print()
+        print("=" * 60)
+        print("📊 MULTI-AGENT STATISTICS")
+        print("=" * 60)
+        print("   🤖 Total Agents: 6")
+        print("      • News Chief (Coordinator)")
+        print("      • Reporter (Writer)")
+        print("      • Researcher (Fact-checker)")
+        print("      • Archivist (Search - Elastic Cloud) ⚠️  REQUIRED")
+        print("      • Editor (Reviewer)")
+        print("      • Publisher (Indexer)")
+        print()
+        print("   🔄 Communication Protocol: A2A (Agent2Agent)")
+        print("      • Internal agents: A2A JSONRPC 2.0")
+        print("      • Archivist: Elastic Agent Builder Converse API")
+        print()
+        print("   ⚡ Parallel Execution:")
+        print("      • Researcher + Archivist run simultaneously")
+        print("      • Saves ~20 seconds vs sequential execution")
+        print()
+        print("   🤖 AI Model Usage:")
+        print("      • Claude Sonnet 4: All Anthropic API calls")
+        print("      • Total API calls: ~6 (outline, research, article, review, edits, tags)")
+        print()
+        print("   📇 Elasticsearch Integration:")
+        print("      • Archivist: Searches news_archive for context")
+        print("      • Publisher: Indexes final articles to news_archive")
+        print()
+        print("   📝 Detailed Logs Available:")
+        print("      • Check individual agent logs for full message flow")
+        print("      • Reporter log shows Researcher + Archivist timing")
         if published_filepath:
-            print(f"💡 Read your published article: {published_filepath}")
+            print(f"      • Published article: {published_filepath}")
         print("="*60)
 
 

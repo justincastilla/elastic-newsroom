@@ -1,0 +1,13 @@
+I1009 12:29:37.229467 8769888576 server.py:66] Static folder enabled: /Users/justin.castilla/Code/elastic-news/ui/static
+I1009 12:29:37.279088 8769888576 main.py:33] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+I1009 12:29:37.279159 8769888576 main.py:34] 🌐 Elastic News UI
+I1009 12:29:37.279179 8769888576 main.py:35] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+I1009 12:29:37.279193 8769888576 main.py:36] 📝 Assignment Form: http://localhost:3000/
+I1009 12:29:37.279205 8769888576 main.py:37] 📄 Article Viewer: http://localhost:3000/article/{story_id}
+I1009 12:29:37.279217 8769888576 main.py:38] 📡 News Chief: http://localhost:8080
+I1009 12:29:37.279226 8769888576 main.py:39] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Running with hot reload:
+
+[32mRunning server on: http://localhost:3000[0m
+ * Serving Flask app 'mesop.server.server'
+ * Debug mode: off

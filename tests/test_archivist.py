@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Standalone test for Archivist agent connectivity
+Test Archivist Agent Integration
 
-Tests the Archivist agent connection, authentication, and response.
+Tests the Elastic Agent Builder Converse API integration used by the Reporter
+to search for historical articles.
 """
 
 import asyncio
 import httpx
 import os
-import sys
 import json
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -20,279 +21,276 @@ load_dotenv()
 ARCHIVIST_URL = os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")
 ARCHIVIST_API_KEY = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
 
-print("=" * 80)
-print("🔍 ARCHIVIST AGENT CONNECTIVITY TEST")
-print("=" * 80)
-print(f"Test started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-print()
 
-# Validate configuration
-print("📋 Configuration Check:")
-print(f"   Archivist URL: {ARCHIVIST_URL}")
-print(f"   API Key configured: {'Yes' if ARCHIVIST_API_KEY else 'No'}")
-if ARCHIVIST_API_KEY:
-    print(f"   API Key (masked): {ARCHIVIST_API_KEY[:20]}...{ARCHIVIST_API_KEY[-10:]}")
-print()
+async def test_archivist_converse_api():
+    """
+    Test the Archivist integration using the Elastic Agent Builder Converse API.
 
-if not ARCHIVIST_URL:
-    print("❌ ERROR: ELASTIC_ARCHIVIST_AGENT_CARD_URL not set in .env")
-    sys.exit(1)
+    This test replicates the exact flow used in reporter.py _send_to_archivist()
+    """
+    print("=" * 80)
+    print("🔍 ARCHIVIST AGENT - CONVERSE API TEST")
+    print("=" * 80)
+    print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-if not ARCHIVIST_API_KEY:
-    print("⚠️  WARNING: ELASTIC_ARCHIVIST_API_KEY not set - request may fail")
-print()
-
-
-async def test_agent_card():
-    """Test 1: Fetch agent card"""
-    print("TEST 1: Fetching Agent Card")
-    print("-" * 80)
-
-    headers = {}
+    # Validate configuration
+    print("📋 Configuration Check:")
+    print(f"   Archivist URL: {ARCHIVIST_URL}")
+    print(f"   API Key configured: {'Yes' if ARCHIVIST_API_KEY else 'No'}")
     if ARCHIVIST_API_KEY:
-        headers["Authorization"] = f"ApiKey {ARCHIVIST_API_KEY}"
+        print(f"   API Key (masked): {ARCHIVIST_API_KEY[:20]}...{ARCHIVIST_API_KEY[-10:]}")
+    print()
 
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            print(f"⏱️  Timeout: 30 seconds")
-            print(f"🌐 GET {ARCHIVIST_URL}")
-
-            start_time = asyncio.get_event_loop().time()
-            response = await client.get(ARCHIVIST_URL, headers=headers)
-            elapsed = asyncio.get_event_loop().time() - start_time
-
-            print(f"✅ Response received in {elapsed:.2f} seconds")
-            print(f"   Status Code: {response.status_code}")
-            print(f"   Response Size: {len(response.content)} bytes")
-
-            response.raise_for_status()
-
-            agent_card = response.json()
-            print(f"   Agent Name: {agent_card.get('name', 'Unknown')}")
-            print(f"   Agent Version: {agent_card.get('version', 'Unknown')}")
-            print(f"   Protocol Version: {agent_card.get('protocol_version', 'Unknown')}")
-
-            if 'skills' in agent_card:
-                print(f"   Skills: {len(agent_card['skills'])} available")
-                for skill in agent_card['skills']:
-                    print(f"      - id: {skill.get('id', 'Unknown')}")
-                    print(f"        name: {skill.get('name', 'Unknown')}")
-                    if 'input_modes' in skill:
-                        print(f"        input_modes: {skill.get('input_modes')}")
-
-            # Save agent card for inspection
-            with open('archivist_agent_card.json', 'w') as f:
-                json.dump(agent_card, f, indent=2)
-            print(f"   📄 Agent card saved to: archivist_agent_card.json")
-
-            print()
-            return agent_card
-
-    except httpx.TimeoutException as e:
-        elapsed = asyncio.get_event_loop().time() - start_time
-        print(f"❌ TIMEOUT after {elapsed:.2f} seconds")
-        print(f"   Error: {e}")
-        return None
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-async def test_a2a_message(agent_card):
-    """Test 2: Send A2A message"""
-    if not agent_card:
-        print("⏭️  Skipping A2A message test (no agent card)")
-        return
-
-    print("TEST 2: Sending A2A Message")
-    print("-" * 80)
-
-    try:
-        from a2a.types import AgentCard
-        from a2a.client import ClientConfig, ClientFactory, create_text_message_object
-
-        headers = {}
-        if ARCHIVIST_API_KEY:
-            headers["Authorization"] = f"ApiKey {ARCHIVIST_API_KEY}"
-
-        # Create A2A client
-        async with httpx.AsyncClient(timeout=120.0, headers=headers) as http_client:
-            print(f"⏱️  Timeout: 120 seconds")
-
-            archivist_card = AgentCard(**agent_card)
-            client_config = ClientConfig(httpx_client=http_client, streaming=False)
-            client_factory = ClientFactory(client_config)
-            archivist_client = client_factory.create(archivist_card)
-
-            # Test search query - try plain text format (as in reporter.py line 482)
-            search_query = "artificial intelligence healthcare"
-            print(f"🔍 Search Query (plain text): '{search_query}'")
-
-            # Create A2A message using the SDK utility (same pattern as reporter.py)
-            message = create_text_message_object(content=search_query)
-
-            print(f"📤 Sending A2A message...")
-            start_time = asyncio.get_event_loop().time()
-
-            response_count = 0
-            async for response in archivist_client.send_message(message):
-                elapsed = asyncio.get_event_loop().time() - start_time
-                response_count += 1
-                print(f"📥 Received response chunk #{response_count} (at {elapsed:.2f}s)")
-
-                # Debug: Show response structure
-                print(f"   Response type: {type(response)}")
-                print(f"   Has parts: {hasattr(response, 'parts')}")
-                if hasattr(response, 'parts'):
-                    print(f"   Parts count: {len(response.parts)}")
-                    print(f"   Parts: {response.parts}")
-
-                if hasattr(response, 'parts') and len(response.parts) > 0:
-                    part = response.parts[0]
-                    print(f"   Part type: {type(part)}")
-
-                    # Inspect the Part root
-                    if hasattr(part, 'root'):
-                        print(f"   Part.root type: {type(part.root)}")
-                        print(f"   Part.root: {part.root}")
-                        if hasattr(part.root, 'metadata') and part.root.metadata:
-                            print(f"   Part.root.metadata: {part.root.metadata}")
-
-                    # Check response metadata
-                    if hasattr(response, 'metadata') and response.metadata:
-                        print(f"   Response metadata: {response.metadata}")
-
-                    text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-
-                    if text_content:
-                        print(f"   Content length: {len(text_content)} characters")
-                        print(f"   Preview: {text_content[:200]}...")
-
-                        # Try to parse as JSON
-                        try:
-                            result = json.loads(text_content)
-                            if isinstance(result, dict):
-                                print(f"   ✅ Valid JSON response")
-                                if 'articles' in result:
-                                    print(f"   📚 Found {len(result['articles'])} articles")
-                        except json.JSONDecodeError:
-                            print(f"   ℹ️  Response is text (not JSON)")
-
-                        print(f"✅ A2A message test successful!")
-                        return True
-                    else:
-                        print(f"   ⚠️  Part has no text content")
-                        # Try to access part content directly
-                        if hasattr(part, 'text'):
-                            print(f"   Direct text: {part.text}")
-                        if hasattr(part, 'content'):
-                            print(f"   Direct content: {part.content}")
-
-            elapsed = asyncio.get_event_loop().time() - start_time
-            print(f"⚠️  No response content (received {response_count} chunks in {elapsed:.2f}s)")
-            return False
-
-    except asyncio.TimeoutError:
-        elapsed = asyncio.get_event_loop().time() - start_time
-        print(f"❌ TIMEOUT after {elapsed:.2f} seconds")
-        return False
-    except Exception as e:
-        print(f"❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+    if not ARCHIVIST_URL:
+        print("❌ ERROR: ELASTIC_ARCHIVIST_AGENT_CARD_URL not set in .env")
+        print("   Set this in your .env file to the agent card URL")
         return False
 
+    if not ARCHIVIST_API_KEY:
+        print("❌ ERROR: ELASTIC_ARCHIVIST_API_KEY not set in .env")
+        print("   Set this in your .env file to authenticate with the Archivist")
+        return False
 
-async def test_elastic_converse_api():
-    """Test 3: Elastic Conversational API (agent_builder/converse)"""
-    print("TEST 3: Elastic Conversational API")
-    print("-" * 80)
+    # Test query - same format as reporter.py
+    topic = "AI Agents Transform Modern Newsrooms"
+    angle = "How A2A protocol enables multi-agent collaboration in journalism"
+    search_query = f"Find articles about {topic} {angle}".strip()
+
+    print("🔍 Test Search Query:")
+    print(f"   Topic: {topic}")
+    print(f"   Angle: {angle}")
+    print(f"   Combined Query: '{search_query}'")
+    print()
+
+    # Extract base URL and agent_id from agent card URL
+    # This matches the logic in reporter.py lines 439-456
+    if "/api/agent_builder/a2a/" not in ARCHIVIST_URL:
+        print(f"❌ ERROR: Invalid Archivist URL format")
+        print(f"   Expected format: https://.../api/agent_builder/a2a/agent-id.json")
+        print(f"   Got: {ARCHIVIST_URL}")
+        return False
+
+    # Extract agent_id
+    agent_id = ARCHIVIST_URL.split("/")[-1]
+    if agent_id.endswith(".json"):
+        agent_id = agent_id[:-5]
+
+    # Build converse API endpoint (per Elastic docs: POST /api/agent_builder/converse)
+    base_url = ARCHIVIST_URL.split("/api/agent_builder/")[0]
+    converse_endpoint = f"{base_url}/api/agent_builder/converse"
+
+    print("📡 API Details:")
+    print(f"   Base URL: {base_url}")
+    print(f"   Agent ID: {agent_id}")
+    print(f"   Converse Endpoint: {converse_endpoint}")
+    print()
+
+    # Create headers (per Elastic docs: requires kbn-xsrf header)
+    headers = {
+        "Content-Type": "application/json",
+        "kbn-xsrf": "true",
+        "Authorization": f"ApiKey {ARCHIVIST_API_KEY}"
+    }
+
+    # Build request (per Elastic docs format)
+    converse_request = {
+        "input": search_query,
+        "agent_id": agent_id
+    }
+
+    print("📨 Sending Request:")
+    print(f"   Timeout: 120 seconds")
+    print(f"   Request Body:")
+    print(json.dumps(converse_request, indent=4))
+    print()
 
     try:
-        # Build converse endpoint URL
-        # Base URL: https://gemini-searchlabs-f15e57.kb.us-central1.gcp.elastic.cloud/api/agent_builder/a2a/archive-agent.json
-        # Converse URL: https://gemini-searchlabs-f15e57.kb.us-central1.gcp.elastic.cloud/api/agent_builder/converse
-        base_url = ARCHIVIST_URL.replace("/agent_builder/a2a/archive-agent.json", "")
-        converse_url = f"{base_url}/agent_builder/converse"
+        start_time = time.time()
 
-        print(f"🌐 Converse URL: {converse_url}")
+        async with httpx.AsyncClient(timeout=120.0) as http_client:
+            print("⏳ Waiting for Archivist response...")
 
-        headers = {
-            "Content-Type": "application/json",
-            "kbn-xsrf": "true"  # Required by Kibana API
-        }
-        if ARCHIVIST_API_KEY:
-            headers["Authorization"] = f"ApiKey {ARCHIVIST_API_KEY}"
-
-        # Use Elastic conversational format
-        converse_request = {
-            "input": "Do we have any articles about artificial intelligence in healthcare?",
-            "agent_id": "archive-agent"
-        }
-
-        print(f"📝 Converse Request:")
-        print(json.dumps(converse_request, indent=2))
-
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            print(f"📤 Sending converse request...")
-            start_time = asyncio.get_event_loop().time()
-
-            response = await client.post(
-                converse_url,
+            response = await http_client.post(
+                converse_endpoint,
                 json=converse_request,
                 headers=headers
             )
 
-            elapsed = asyncio.get_event_loop().time() - start_time
-            print(f"✅ Response received in {elapsed:.2f} seconds")
-            print(f"   Status Code: {response.status_code}")
+            elapsed = time.time() - start_time
 
+            print(f"\n📥 Response Received:")
+            print(f"   Elapsed Time: {elapsed:.1f} seconds")
+            print(f"   Status Code: {response.status_code}")
+            print(f"   Response Size: {len(response.text)} characters")
+            print()
+
+            # Check status code
             if response.status_code != 200:
-                print(f"   ❌ Error Response:")
-                print(f"   {response.text}")
+                print(f"❌ ERROR: HTTP {response.status_code}")
+                print(f"   Response: {response.text}")
+                response.raise_for_status()
                 return False
 
+            # Parse response
             result = response.json()
-            print(f"📥 Converse Response:")
-            print(json.dumps(result, indent=2)[:2000])  # Limit output
 
-            # Check if we got actual content
-            if isinstance(result, dict):
-                # Look for common response fields
-                if 'response' in result or 'message' in result or 'output' in result:
-                    print(f"\n✅ Got response content!")
-                    return True
+            print("📄 Response Structure:")
+            print(f"   Keys: {list(result.keys())}")
+            print()
+
+            # Extract text response from Elastic Conversational API
+            # Response structure: {"conversation_id": "...", "steps": [...], "response": {...}}
+            conversation_id = result.get("conversation_id", "")
+
+            # The response is in the steps array, particularly in tool_call results
+            full_response = ""
+            articles = []
+
+            steps = result.get("steps", [])
+            for step in steps:
+                if step.get("type") == "tool_call" and "results" in step:
+                    # Extract results from the tool call
+                    for tool_result in step.get("results", []):
+                        if tool_result.get("type") == "resource":
+                            data = tool_result.get("data", {})
+                            content = data.get("content", {})
+
+                            # Extract highlights or full text
+                            highlights = content.get("highlights", [])
+                            if highlights:
+                                full_response += "\n".join(highlights) + "\n\n"
+
+                            # Store article reference
+                            reference = data.get("reference", {})
+                            if reference:
+                                articles.append({
+                                    "id": reference.get("id", "unknown"),
+                                    "index": reference.get("index", "unknown"),
+                                    "content": "\n".join(highlights) if highlights else ""
+                                })
+
+            # Also check the response field for final answer
+            response_field = result.get("response", {})
+            if isinstance(response_field, dict):
+                response_text = response_field.get("text", response_field.get("message", response_field.get("content", "")))
+                if response_text:
+                    full_response += response_text
+            elif isinstance(response_field, str) and response_field:
+                full_response += response_field
+
+            if not full_response.strip():
+                print("⚠️  WARNING: No response text found in any expected field")
+                print("   Full Response Structure:")
+                print(json.dumps(result, indent=4)[:2000])
+                print()
+                return False
+
+            # Display results (same format as reporter.py)
+            print("=" * 80)
+            print("📚 ARCHIVIST SEARCH RESULTS:")
+            print("=" * 80)
+            print(f"   🔍 Search Query: {search_query}")
+            print(f"   💬 Conversation ID: {conversation_id}")
+            print(f"   📊 Found {len(articles)} historical articles")
+            print(f"   📝 Response Length: {len(full_response)} characters")
+            print()
+
+            if articles:
+                print("   📰 Article References:")
+                for i, article in enumerate(articles, 1):
+                    article_id = article.get('id', 'Unknown')
+                    article_index = article.get('index', 'Unknown')
+                    content = article.get('content', '')
+                    preview = content[:100] if content else "No content"
+                    print(f"      {i}. {article_id} (index: {article_index})")
+                    print(f"         Preview: {preview}...")
+                print()
+            print("   Response Preview:")
+            print("   " + "-" * 76)
+
+            # Show first 500 characters
+            preview = full_response[:500]
+            for line in preview.split('\n'):
+                print(f"   {line}")
+
+            if len(full_response) > 500:
+                print(f"   ... (truncated, showing 500 of {len(full_response)} chars)")
+
+            print("   " + "-" * 76)
+            print()
+
+            # Save full response to file for inspection
+            output_file = "archivist_test_response.txt"
+            with open(output_file, 'w') as f:
+                f.write(f"Archivist Test Response\n")
+                f.write(f"{'=' * 80}\n")
+                f.write(f"Query: {search_query}\n")
+                f.write(f"Conversation ID: {conversation_id}\n")
+                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+                f.write(f"{'=' * 80}\n\n")
+                f.write(full_response)
+
+            print(f"💾 Full response saved to: {output_file}")
+            print()
+
+            # Test success
+            print("=" * 80)
+            print("✅ ARCHIVIST TEST PASSED")
+            print("=" * 80)
+            print(f"   Successfully received {len(full_response)} characters")
+            print(f"   Elapsed time: {elapsed:.1f} seconds")
+            print(f"   The Archivist integration is working correctly!")
+            print()
 
             return True
 
+    except httpx.TimeoutException as e:
+        elapsed = time.time() - start_time
+        print(f"\n❌ TIMEOUT ERROR after {elapsed:.1f} seconds")
+        print(f"   The Archivist took too long to respond (> 120 seconds)")
+        print(f"   Error: {e}")
+        print()
+        return False
+
+    except httpx.HTTPStatusError as e:
+        print(f"\n❌ HTTP ERROR: {e}")
+        print(f"   Status Code: {e.response.status_code}")
+        print(f"   Response: {e.response.text}")
+        print()
+        return False
+
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"\n❌ UNEXPECTED ERROR: {e}")
         import traceback
         traceback.print_exc()
+        print()
         return False
 
 
 async def main():
-    """Run all tests"""
+    """Run the Archivist test"""
+    success = await test_archivist_converse_api()
 
-    # Test 1: Agent Card
-    agent_card = await test_agent_card()
-
-    # Test 2: A2A Message (via SDK)
-    if agent_card:
-        await test_a2a_message(agent_card)
-
-    # Test 3: Elastic Conversational API
-    print()
-    await test_elastic_converse_api()
-
-    print()
     print("=" * 80)
-    print(f"Test completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 80)
+    print()
+
+    if not success:
+        print("⚠️  Test failed. Please check the error messages above.")
+        print()
+        print("Common issues:")
+        print("   1. ELASTIC_ARCHIVIST_AGENT_CARD_URL not set in .env")
+        print("   2. ELASTIC_ARCHIVIST_API_KEY not set or invalid in .env")
+        print("   3. Network connectivity issues")
+        print("   4. Archivist agent is down or unavailable")
+        print()
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)

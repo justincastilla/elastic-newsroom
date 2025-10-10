@@ -13,6 +13,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
+from starlette.middleware.cors import CORSMiddleware
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -27,6 +28,8 @@ load_env_config()
 # Configure logging using centralized utility
 logger = setup_logger("EDITOR")
 
+# Singleton instance for maintaining state across requests
+_editor_agent_instance = None
 
 class EditorAgent:
     """Editor Agent - Reviews drafts and provides editorial feedback"""
@@ -49,13 +52,17 @@ class EditorAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
             action = query_data.get("action")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action != "get_status":
+                logger.info(f"🎯 Action: {action}")
 
             if action == "review_draft":
                 return await self._review_draft(query_data)
@@ -229,7 +236,7 @@ Provide only the JSON response, no additional text."""
             try:
                 message = self.anthropic_client.messages.create(
                     model="claude-sonnet-4-20250514",
-                    max_tokens=3000,
+                    max_tokens=4096,  # Increased from 3000 to handle longer JSON responses
                     messages=[{
                         "role": "user",
                         "content": prompt
@@ -332,11 +339,20 @@ Provide only the JSON response, no additional text."""
         }
 
 
+def get_editor_agent() -> EditorAgent:
+    """Get singleton EditorAgent instance to maintain state across requests"""
+    global _editor_agent_instance
+    if _editor_agent_instance is None:
+        _editor_agent_instance = EditorAgent()
+    return _editor_agent_instance
+
+
 class EditorAgentExecutor(AgentExecutor):
     """AgentExecutor for the Editor agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = EditorAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_editor_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -360,7 +376,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
     """Create the Editor agent card"""
     return AgentCard(
         name="Editor",
-        description="Reviews article drafts for grammar, tone, consistency, and length. Provides detailed editorial feedback.",
+        description="Reviews article drafts for grammar, tone, consistency, and length. Works through News Chief for workflow coordination.",
         url=f"http://{host}:{port}",
         version="1.0.0",
         preferred_transport="JSONRPC",
@@ -428,7 +444,50 @@ def create_app(host='localhost', port=8082):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+    
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )    
+    # Add direct HTTP endpoints for React UI
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse
+    
+    async def direct_get_status(request):
+        """Direct HTTP endpoint for editor status"""
+        try:
+            data = await request.json()
+            agent = get_editor_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # Add clear endpoint
+    async def clear_all(request):
+        """Clear all reviews and reset to idle state"""
+        try:
+            editor = get_editor_agent()
+            editor.reviews = {}
+            logger.info("🧹 Editor: Cleared all reviews and reset to idle")
+            return {"status": "success", "message": "All reviews cleared"}
+        except Exception as e:
+            logger.error(f"Error clearing reviews: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    # Add routes
+    app.router.routes.extend([
+        Route("/get-status", direct_get_status, methods=["POST"]),
+        Route("/clear-all", clear_all, methods=["POST"]),
+    ])
+    
+    
+    return app
 
 
 # Create default app instance for uvicorn

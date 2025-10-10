@@ -69,6 +69,22 @@ def extract_json_from_llm_response(
             # 1. Remove trailing commas before closing brackets/braces
             response_text = re.sub(r',(\s*[}\]])', r'\1', response_text)
             
+            # 2. Fix missing commas between array elements
+            # Look for patterns like "}" followed by "{" which should have a comma
+            response_text = re.sub(r'}\s*{', '},{', response_text)
+            
+            # 3. Fix missing commas between object properties
+            # Look for patterns like '"}' followed by '"' which should have a comma
+            response_text = re.sub(r'"}\s*"', '"},"', response_text)
+            
+            # 4. Fix missing commas in arrays of objects
+            # Look for patterns like "}" followed by "]" which should have a comma
+            response_text = re.sub(r'}\s*]', '},]', response_text)
+            
+            # 5. Fix missing commas between array elements (more specific)
+            # Look for "}" followed by whitespace and "{" in arrays
+            response_text = re.sub(r'}\s*{\s*"', '},{"', response_text)
+            
             # 2. Check if JSON is truncated - if it doesn't end with }, try to close it
             response_text = response_text.strip()
             if not response_text.endswith('}'):

@@ -64,6 +64,9 @@ pip install -r requirements.txt
 
 # Optional: Install UI dependencies
 cd ui && pip install -e . && cd ..
+
+# Optional: Install React UI dependencies
+cd react-ui && npm install && cd ..
 ```
 
 ### 2. Configure Environment
@@ -103,19 +106,44 @@ python scripts/create_elasticsearch_index.py
 - Assignment Form: http://localhost:3000/
 - Article Viewer: http://localhost:3000/article/{story_id}
 
+**React UI** (Alternative modern interface):
+- Start: `cd react-ui && ./start.sh`
+- Access: http://localhost:3001/
+
 ### 5. Run the Workflow
 
-**Option 1: Web UI** (Recommended)
+**Option 1: React UI** (Recommended - Modern Interface)
 ```bash
+# Start the React UI
+cd react-ui && ./start.sh
+
+# Navigate to http://localhost:3001
+# Fill out the story assignment form
+# Watch real-time agent activity and workflow progress
+# View completed articles with live status updates
+```
+
+**Option 2: Mesop Web UI** (Alternative)
+```bash
+# Start with UI
+./start_newsroom.sh --with-ui
+
 # Navigate to http://localhost:3000
 # Fill out the story assignment form
 # View real-time progress on the status page
 # Read the completed article on the article viewer page
 ```
 
-**Option 2: Test Script**
+**Option 3: Detailed Test Script**
 ```bash
-python tests/test_newsroom_workflow.py
+# Run with real-time monitoring and detailed output
+python run_detailed_test.py
+
+# Or run the test directly
+python tests/test_newsroom_workflow_detailed.py
+
+# Full demonstration with setup verification
+python demo_workflow.py
 ```
 
 This will:
@@ -125,7 +153,7 @@ This will:
 4. Have Editor review and refine the article
 5. Have Publisher index to Elasticsearch and save to file
 
-**Option 3: Archivist Diagnostics**
+**Option 4: Archivist Diagnostics**
 ```bash
 python test_archivist.py
 ```
@@ -152,6 +180,13 @@ elastic-news/
 │   │   └── news_chief_client.py # API client
 │   └── state/                  # UI state management
 │       └── app_state.py        # Application state
+├── react-ui/                    # React UI (Modern Interface)
+│   ├── src/                    # React source code
+│   │   ├── components/         # UI components
+│   │   ├── services/           # API services
+│   │   └── hooks/              # Custom React hooks
+│   ├── public/                 # Static assets
+│   └── package.json            # Node.js dependencies
 ├── scripts/                     # Utility scripts
 │   └── create_elasticsearch_index.py
 ├── tests/                       # Test suite
@@ -179,6 +214,7 @@ elastic-news/
 - **Multi-Agent Coordination**: 5 agents communicate via A2A protocol
 - **Complete Workflow**: End-to-end article production from assignment to publication
 - **Web UI**: Interactive story assignment, real-time status tracking, and article viewing (port 3000)
+- **React UI**: Modern React interface with live agent monitoring and workflow visualization (port 3001)
 - **Elasticsearch Integration**: Historical article indexing and search via `news_archive` index
 - **Elastic Archivist Integration**: Cloud-based search agent via Conversational API
 - **Claude Sonnet 4**: AI-powered research, writing, and editing
@@ -188,6 +224,9 @@ elastic-news/
 - **Article Data Flow**: Structured article data (headline, content, word count) passed through workflow
 - **Status Page**: Real-time workflow progress with manual refresh
 - **Archivist Diagnostics**: Standalone test tool to verify Elastic Cloud connectivity
+- **Detailed Workflow Test**: Real-time monitoring with step-by-step agent activity display
+- **Performance Metrics**: Timing analysis and efficiency measurements
+- **Interactive Demonstration**: Complete setup verification and workflow showcase
 
 🔄 **In Progress**
 
@@ -242,11 +281,17 @@ User views completed article in Web UI
 
 ### Web UI
 ```bash
-./start_ui.sh                    # Start UI only (agents must be running)
-open http://localhost:3000       # Open UI in browser
+./start_ui.sh                    # Start Mesop UI only (agents must be running)
+open http://localhost:3000       # Open Mesop UI in browser
 ```
 
-**Hot Reload:** The UI has hot reload enabled by default (Mesop feature). Changes to `ui/` files reload automatically.
+### React UI
+```bash
+cd react-ui && ./start.sh        # Start React UI (agents must be running)
+open http://localhost:3001       # Open React UI in browser
+```
+
+**Hot Reload:** Both UIs have hot reload enabled by default. Changes to `ui/` or `react-ui/` files reload automatically.
 
 ### View Logs
 ```bash
@@ -256,9 +301,18 @@ tail -f logs/News_Chief.log   # Specific agent
 
 ### Run Tests
 ```bash
-python tests/test_newsroom_workflow.py    # End-to-end workflow
+# Detailed workflow test with real-time monitoring (RECOMMENDED)
+python run_detailed_test.py
+
+# Or run the test directly
+python tests/test_newsroom_workflow_detailed.py
+
+# Other tests
 python tests/test_elasticsearch_index.py  # Elasticsearch index test
-python test_archivist.py                  # Archivist connectivity and API test
+python tests/test_archivist.py           # Archivist connectivity test
+
+# Full demonstration with setup verification
+python demo_workflow.py
 ```
 
 ### Individual Agents

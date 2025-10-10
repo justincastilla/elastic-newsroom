@@ -1,0 +1,9 @@
+I1009 12:18:30.542661 8769888576 server.py:66] Static folder enabled: /Users/justin.castilla/Code/elastic-news/ui/static
+I1009 12:18:30.591124 8769888576 main.py:23] 🚀 Elastic News UI loaded
+I1009 12:18:30.591197 8769888576 main.py:24] 📝 Assignment Form: http://localhost:3000/
+I1009 12:18:30.591218 8769888576 main.py:25] 📄 Article Viewer: http://localhost:3000/article/{story_id}
+Running with hot reload:
+
+[32mRunning server on: http://localhost:3000[0m
+ * Serving Flask app 'mesop.server.server'
+ * Debug mode: off

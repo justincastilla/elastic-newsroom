@@ -12,6 +12,7 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
+from starlette.middleware.cors import CORSMiddleware
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -26,6 +27,8 @@ load_env_config()
 # Configure logging using centralized utility
 logger = setup_logger("RESEARCHER")
 
+# Singleton instance for maintaining state across requests
+_researcher_agent_instance = None
 
 class ResearcherAgent:
     """Researcher Agent - Provides factual information and supporting data"""
@@ -47,13 +50,17 @@ class ResearcherAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
             action = query_data.get("action")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action != "get_status":
+                logger.info(f"🎯 Action: {action}")
 
             if action == "research_questions":
                 return await self._research_questions(query_data)
@@ -310,11 +317,20 @@ Provide ONLY the JSON array, no additional text."""
         }
 
 
+def get_researcher_agent() -> ResearcherAgent:
+    """Get singleton ResearcherAgent instance to maintain state across requests"""
+    global _researcher_agent_instance
+    if _researcher_agent_instance is None:
+        _researcher_agent_instance = ResearcherAgent()
+    return _researcher_agent_instance
+
+
 class ResearcherAgentExecutor(AgentExecutor):
     """AgentExecutor for the Researcher agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = ResearcherAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_researcher_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -403,7 +419,50 @@ def create_app(host='localhost', port=8083):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+    
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )    
+    # Add direct HTTP endpoints for React UI
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse
+    
+    async def direct_get_status(request):
+        """Direct HTTP endpoint for researcheragent status"""
+        try:
+            data = await request.json()
+            agent = get_researcher_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # Add clear endpoint
+    async def clear_all(request):
+        """Clear all research history and reset to idle state"""
+        try:
+            researcher = get_researcher_agent()
+            researcher.research_history = {}
+            logger.info("🧹 Researcher: Cleared all research history and reset to idle")
+            return {"status": "success", "message": "All research history cleared"}
+        except Exception as e:
+            logger.error(f"Error clearing research history: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    # Add routes
+    app.router.routes.extend([
+        Route("/get-status", direct_get_status, methods=["POST"]),
+        Route("/clear-all", clear_all, methods=["POST"]),
+    ])
+    
+    
+    return app
 
 
 # Create default app instance for uvicorn
