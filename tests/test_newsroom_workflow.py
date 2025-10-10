@@ -24,9 +24,10 @@ async def test_newsroom_workflow():
     news_chief_url = "http://localhost:8080"
     reporter_url = "http://localhost:8081"
 
-    # Use longer timeout for Anthropic API calls with research (can take 50+ seconds)
-    # Reporter now: generates outline (8s) + researcher bulk call (15s) + writes article (15s) = ~40s
-    async with httpx.AsyncClient(timeout=90.0) as http_client:
+    # Use longer timeout for Anthropic API calls with research and Archivist
+    # Reporter now: generates outline (8s) + researcher bulk call (15s) + archivist (up to 94s with retries) + writes article (15s) = ~130s
+    # Set timeout to 180 seconds (3 minutes) to be safe
+    async with httpx.AsyncClient(timeout=180.0) as http_client:
 
         # ========================================
         # STEP 1: Connect to News Chief
