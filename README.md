@@ -62,9 +62,6 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
 ```bash
 pip install -r requirements.txt
 
-# Optional: Install UI dependencies
-cd ui && pip install -e . && cd ..
-
 # Optional: Install React UI dependencies
 cd react-ui && npm install && cd ..
 ```
@@ -95,26 +92,26 @@ python scripts/create_elasticsearch_index.py
 # Or with hot reload for development
 ./start_newsroom.sh --reload
 
-# Start agents + web UI on port 3000
+# Start agents + React UI on port 3001
 ./start_newsroom.sh --with-ui
 
 # Stop all agents (and UI if running)
 ./start_newsroom.sh --stop
 ```
 
-**Web UI** (if started with `--with-ui`):
-- Assignment Form: http://localhost:3000/
-- Article Viewer: http://localhost:3000/article/{story_id}
-
-**React UI** (Alternative modern interface):
-- Start: `cd react-ui && ./start.sh`
+**React UI** (if started with `--with-ui`):
+- Start: `cd react-ui && ./start.sh` or `./start_newsroom.sh --with-ui`
 - Access: http://localhost:3001/
+- Features: Real-time agent monitoring, workflow visualization, live status updates
 
 ### 5. Run the Workflow
 
 **Option 1: React UI** (Recommended - Modern Interface)
 ```bash
-# Start the React UI
+# Start all agents and React UI
+./start_newsroom.sh --with-ui
+
+# Or start React UI separately (agents must be running)
 cd react-ui && ./start.sh
 
 # Navigate to http://localhost:3001
@@ -123,27 +120,13 @@ cd react-ui && ./start.sh
 # View completed articles with live status updates
 ```
 
-**Option 2: Mesop Web UI** (Alternative)
-```bash
-# Start with UI
-./start_newsroom.sh --with-ui
-
-# Navigate to http://localhost:3000
-# Fill out the story assignment form
-# View real-time progress on the status page
-# Read the completed article on the article viewer page
-```
-
-**Option 3: Detailed Test Script**
+**Option 2: Test Script**
 ```bash
 # Run with real-time monitoring and detailed output
-python run_detailed_test.py
+python run_live_test.py
 
-# Or run the test directly
-python tests/test_newsroom_workflow_detailed.py
-
-# Full demonstration with setup verification
-python demo_workflow.py
+# Or run the comprehensive test directly
+python tests/test_newsroom_workflow_comprehensive.py
 ```
 
 This will:
@@ -171,16 +154,7 @@ elastic-news/
 │   ├── researcher.py           # Research gatherer (port 8083)
 │   ├── editor.py               # Content reviewer (port 8082)
 │   └── publisher.py            # Article publisher (port 8084)
-├── ui/                          # Web UI (Mesop)
-│   ├── pages/                  # UI pages
-│   │   ├── home.py             # Story assignment form
-│   │   ├── status.py           # Workflow progress
-│   │   └── article.py          # Article viewer
-│   ├── services/               # UI services
-│   │   └── news_chief_client.py # API client
-│   └── state/                  # UI state management
-│       └── app_state.py        # Application state
-├── react-ui/                    # React UI (Modern Interface)
+├── react-ui/                    # React UI
 │   ├── src/                    # React source code
 │   │   ├── components/         # UI components
 │   │   ├── services/           # API services
@@ -190,9 +164,9 @@ elastic-news/
 ├── scripts/                     # Utility scripts
 │   └── create_elasticsearch_index.py
 ├── tests/                       # Test suite
-│   ├── test_newsroom_workflow.py    # End-to-end workflow test
-│   ├── test_elasticsearch_index.py  # ES index creation test
-│   └── test_archivist.py            # Archivist connectivity test
+│   ├── test_newsroom_workflow_comprehensive.py  # End-to-end workflow test
+│   ├── test_elasticsearch_index.py              # ES index creation test
+│   └── test_archivist.py                        # Archivist connectivity test
 ├── docs/                        # Documentation
 │   ├── configuration-guide.md   # Environment setup
 │   ├── elasticsearch-schema.md  # Index mapping
@@ -200,7 +174,6 @@ elastic-news/
 ├── articles/                    # Published articles (auto-generated)
 ├── logs/                        # Agent logs (auto-generated)
 ├── start_newsroom.sh            # Start/stop all agents
-├── start_ui.sh                  # Start UI only
 ├── requirements.txt             # Python dependencies
 ├── env.example                  # Environment template
 └── README.md                    # This file
@@ -212,20 +185,17 @@ elastic-news/
 
 - **Multi-Agent Coordination**: 5 agents communicate via A2A protocol
 - **Complete Workflow**: End-to-end article production from assignment to publication
-- **Web UI**: Interactive story assignment, real-time status tracking, and article viewing (port 3000)
 - **React UI**: Modern React interface with live agent monitoring and workflow visualization (port 3001)
 - **Elasticsearch Integration**: Historical article indexing and search via `news_archive` index
 - **Elastic Archivist Integration**: Cloud-based search agent via Conversational API
 - **Claude Sonnet 4**: AI-powered research, writing, and editing
 - **Process Management**: Single command to start/stop all agents
 - **Comprehensive Logging**: Individual log files for each agent with detailed diagnostics
-- **Hot Reload Support**: Development mode with auto-reload for agents and UI
+- **Hot Reload Support**: Development mode with auto-reload for agents
 - **Article Data Flow**: Structured article data (headline, content, word count) passed through workflow
-- **Status Page**: Real-time workflow progress with manual refresh
+- **Real-time Monitoring**: Live agent status updates and workflow progress visualization
 - **Archivist Diagnostics**: Standalone test tool to verify Elastic Cloud connectivity
-- **Detailed Workflow Test**: Real-time monitoring with step-by-step agent activity display
-- **Performance Metrics**: Timing analysis and efficiency measurements
-- **Interactive Demonstration**: Complete setup verification and workflow showcase
+- **Comprehensive Workflow Test**: Real-time monitoring with detailed agent activity display
 
 🔄 **In Progress**
 
@@ -242,7 +212,7 @@ elastic-news/
 ## Workflow Example
 
 ```
-User submits story via Web UI (http://localhost:3000)
+User submits story via React UI (http://localhost:3001)
     ↓
 News Chief assigns story to Reporter
     ↓
@@ -289,7 +259,7 @@ cd react-ui && ./start.sh        # Start React UI (agents must be running)
 open http://localhost:3001       # Open React UI in browser
 ```
 
-**Hot Reload:** Both UIs have hot reload enabled by default. Changes to `ui/` or `react-ui/` files reload automatically.
+**Hot Reload:** React UI has hot reload enabled by default. Changes to `react-ui/` files reload automatically in development mode.
 
 ### View Logs
 ```bash
