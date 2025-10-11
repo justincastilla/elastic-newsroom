@@ -172,28 +172,27 @@ if [ $FAILED -eq 0 ]; then
     # Start UI if requested
     if [ "$START_UI" = true ]; then
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-        echo -e "${YELLOW}🌐 Starting UI on port 3000...${NC}"
+        echo -e "${YELLOW}🌐 Starting React UI on port 3001...${NC}"
 
-        # Check if UI dependencies are installed
-        if [ ! -f "ui/pyproject.toml" ]; then
-            echo -e "${RED}   ❌ UI not found in ui/ directory${NC}"
+        # Check if React UI exists
+        if [ ! -f "react-ui/package.json" ]; then
+            echo -e "${RED}   ❌ React UI not found in react-ui/ directory${NC}"
         else
-            # Note: Mesop has hot reload enabled by default (no flag needed)
-            cd ui
-            mesop main.py --port=3000 > "../$LOG_DIR/UI.log" 2>&1 &
+            cd react-ui
+            # Start React UI in background
+            npm start > "../$LOG_DIR/UI.log" 2>&1 &
             UI_PID=$!
             echo "UI:$UI_PID" >> "../$PID_FILE"
             cd ..
 
-            sleep 1
+            sleep 2
 
             if ps -p $UI_PID > /dev/null 2>&1; then
-                echo -e "${GREEN}   ✅ UI started (PID: $UI_PID)${NC}"
+                echo -e "${GREEN}   ✅ React UI started (PID: $UI_PID)${NC}"
                 echo -e "${BLUE}      Logs: $LOG_DIR/UI.log${NC}"
-                echo -e "${BLUE}      URL: http://localhost:3000${NC}"
+                echo -e "${BLUE}      URL: http://localhost:3001${NC}"
                 echo ""
-                echo -e "${BLUE}📝 Assignment Form:  http://localhost:3000/${NC}"
-                echo -e "${BLUE}📄 Article Viewer:   http://localhost:3000/article/{story_id}${NC}"
+                echo -e "${BLUE}📝 React UI will open automatically at http://localhost:3001${NC}"
             else
                 echo -e "${RED}   ❌ UI failed to start${NC}"
                 echo -e "${RED}      Check logs: $LOG_DIR/UI.log${NC}"
