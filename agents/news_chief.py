@@ -649,7 +649,6 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         url=f"http://{host}:{port}",
         version="1.0.0",
         preferred_transport="JSONRPC",
-        documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/news-chief-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
             push_notifications=True,

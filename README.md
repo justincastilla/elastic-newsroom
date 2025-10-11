@@ -196,7 +196,6 @@ elastic-news/
 ├── docs/                        # Documentation
 │   ├── configuration-guide.md   # Environment setup
 │   ├── elasticsearch-schema.md  # Index mapping
-│   ├── news-chief-agent.md      # News Chief details
 │   └── archivist-integration.md # Archivist setup
 ├── articles/                    # Published articles (auto-generated)
 ├── logs/                        # Agent logs (auto-generated)
@@ -238,7 +237,6 @@ elastic-news/
 
 - [Configuration Guide](docs/configuration-guide.md) - Environment setup and API configuration
 - [Elasticsearch Schema](docs/elasticsearch-schema.md) - Index mapping and field definitions
-- [News Chief Agent](docs/news-chief-agent.md) - Coordinator agent details
 - [Archivist Integration](docs/archivist-integration.md) - External agent setup
 
 ## Workflow Example
