@@ -62,21 +62,33 @@ These items can be removed or cleaned up with minimal risk.
 
 **Risk**: Low - these are docs only
 
-### 5. JavaScript Test Files Status 🔍 NEEDS INVESTIGATION
+### 5. JavaScript Test Files Status 🔍 ANALYSIS COMPLETE
 **Files**:
 - `tests/test_researcher_workflow.js`
 - `tests/test_researcher_active_workflow.js`
 - `tests/test_researcher_current_status.js`
 - `tests/test_researcher_status.js`
 
-**Issue**: 4 JS test files exist but unclear if they're actively used
-**Action**: 
-1. Check if `package.json` references them in test scripts
-2. Verify if they're part of any CI/CD
-3. Check if they test functionality not covered by Python tests
+**Purpose**: These test the Researcher agent status detection in the React UI
+**Dependency**: `package.json` has `axios` dependency for these tests
 
-**Risk**: Medium - need to verify purpose before removing
-**Investigation needed**: Are these for the React UI or legacy?
+**Analysis**:
+- These are UI-specific tests for React UI
+- They test the AgentStatus component logic
+- NOT part of standard npm test scripts
+- Appear to be manual/ad-hoc tests run with `node tests/test_*.js`
+
+**Recommendation**:
+- If keeping React UI: Move these to `react-ui/tests/` for better organization
+- If removing React UI: Delete these test files
+- If keeping both UIs: Move to React UI folder
+
+**Action**: 
+1. First decide on UI strategy (React vs Mesop)
+2. If React UI is primary: `mv tests/test_researcher*.js react-ui/tests/`
+3. Update React UI to document these tests
+
+**Risk**: Low - these are test files only, not critical infrastructure
 
 ---
 
@@ -86,20 +98,33 @@ These items likely can be cleaned up but require verification of usage.
 
 ### 6. React UI vs Mesop UI 🎨 IMPORTANT DECISION
 **Situation**: Two UI implementations exist
-- `ui/` - Mesop-based UI (Python, Mesop framework)
-- `react-ui/` - React-based UI (JavaScript, React framework)
+- `ui/` - Mesop-based UI (Python, Mesop framework) - Simpler, assignment + view
+- `react-ui/` - React-based UI (JavaScript, React framework) - Real-time monitoring, richer features
 
-**Questions**:
-1. Which UI is actively used/preferred?
-2. Are both maintained or is one deprecated?
-3. Do they serve different purposes?
+**Git History Analysis**: 
+- Recent commit says "switch to react"
+- React UI has more features (real-time agent status, progress bars)
+- Mesop UI is simpler (just assignment form and article view)
 
-**Action**: Determine which UI is the "official" one
-- If Mesop only: Archive or remove `react-ui/`
-- If React only: Archive or remove `ui/`
-- If both active: Document why and when to use each
+**Both run on port 3000** - conflict if both started
 
-**Risk**: High if wrong one removed - need clear answer from maintainer
+**Recommendation Based on Analysis**:
+- **Keep React UI** (`react-ui/`) as the primary UI
+  - More feature-rich
+  - Better user experience with real-time updates
+  - Recent commit indicates this is the direction
+- **Archive Mesop UI** (`ui/`) 
+  - Simpler, less features
+  - Appears to be earlier/prototype implementation
+  - Can be kept in archive for reference
+
+**Action**: 
+1. Verify with maintainer: Is React UI the primary UI now?
+2. If yes: Move `ui/` to `ui-mesop-archived/` or delete
+3. Update README to document React UI only
+4. Update start scripts if needed
+
+**Risk**: High if wrong one removed - MUST CONFIRM with maintainer first
 
 ### 7. Multiple Test Files - Consolidation Opportunity 🧪
 **Files**:
