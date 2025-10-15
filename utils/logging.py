@@ -13,7 +13,7 @@ from typing import Optional
 
 def setup_logger(
     name: str,
-    log_file: str = "newsroom.log",
+    log_file: str = "logs/newsroom.log",
     level: int = logging.INFO,
     console: bool = False
 ) -> logging.Logger:
@@ -22,7 +22,7 @@ def setup_logger(
 
     Args:
         name: Name of the logger (e.g., "NEWS_CHIEF", "REPORTER", "UI")
-        log_file: Path to log file (default: "newsroom.log")
+        log_file: Path to log file (default: "logs/newsroom.log")
         level: Logging level (default: logging.INFO)
         console: Whether to also log to console (default: False)
 

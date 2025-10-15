@@ -6,9 +6,10 @@ news_chief.log
 *.pyc
 __pycache__/
 .env
+node_modules/
+.vscode/
 CLAUDE.md
 
 # Agent logs and PIDs
 logs/
 .newsroom_pids
-node_modules/
