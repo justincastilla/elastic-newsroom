@@ -16,11 +16,28 @@ const ArticleViewer = ({ storyId, onBack }) => {
     try {
       setLoading(true);
       setError(null);
-      
-      // Fetch from Publisher agent endpoint
-      const response = await fetch(`http://localhost:8084/article/${id}`);
+
+      // Fetch from Article API backend (separate from agent architecture)
+      const response = await fetch(`http://localhost:8085/article/${id}`);
       if (response.ok) {
-        const articleData = await response.json();
+        let articleData = await response.json();
+
+        // Fix headline if it's "Untitled" but content has "HEADLINE:" prefix
+        if (articleData.headline === "Untitled" && articleData.content) {
+          const lines = articleData.content.split('\n');
+          const headlineLine = lines.find(line => line.trim().startsWith('HEADLINE:'));
+          if (headlineLine) {
+            articleData.headline = headlineLine.replace('HEADLINE:', '').trim();
+          }
+        }
+
+        // Remove "HEADLINE: ..." line from content since we display it separately
+        if (articleData.content) {
+          const lines = articleData.content.split('\n');
+          const filteredLines = lines.filter(line => !line.trim().startsWith('HEADLINE:'));
+          articleData.content = filteredLines.join('\n').trim();
+        }
+
         setArticle(articleData);
       } else {
         throw new Error(`Article not found: ${response.status} ${response.statusText}`);

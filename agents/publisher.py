@@ -23,6 +23,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+from agents.base_agent import BaseAgent
 
 # Load environment variables
 load_env_config()
@@ -33,13 +34,15 @@ logger = setup_logger("PUBLISHER")
 # Singleton instance for maintaining state across requests
 _publisher_agent_instance = None
 
-class PublisherAgent:
+class PublisherAgent(BaseAgent):
     """Publisher Agent - Publishes articles to Elasticsearch and manages deployment"""
 
     def __init__(self):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.published_articles: Dict[str, Dict[str, Any]] = {}
         self.es_client = None
-        self.anthropic_client = None
         self.es_index = os.getenv("ELASTIC_ARCHIVIST_INDEX", "news_archive")
 
         # Initialize Elasticsearch client
@@ -63,8 +66,8 @@ class PublisherAgent:
         else:
             logger.warning("⚠️  Elasticsearch credentials not configured")
 
-        # Initialize Anthropic client using centralized utility
-        self.anthropic_client = init_anthropic_client(logger)
+        # Initialize Anthropic client using centralized utility (from BaseAgent)
+        self._init_anthropic_client()
         if self.anthropic_client:
             logger.info("(for tag generation)")
         else:
@@ -132,6 +135,17 @@ class PublisherAgent:
             }
 
         story_id = article_data.get("story_id")
+
+        # Publish event: publication started
+        await self._publish_event(
+            event_type="publication_started",
+            story_id=story_id,
+            data={
+                "headline": article_data.get("headline"),
+                "word_count": article_data.get("word_count")
+            }
+        )
+
         logger.info(f"📋 Publication details:")
         logger.info(f"   Story ID: {story_id}")
         logger.info(f"   Headline: {article_data.get('headline', 'N/A')[:60]}...")
@@ -166,6 +180,13 @@ class PublisherAgent:
         file_path = await self._save_article_to_file(article_data, tags, categories)
         logger.info(f"✅ Article saved to: {file_path}")
 
+        # Publish event: file saved
+        await self._publish_event(
+            event_type="file_saved",
+            story_id=story_id,
+            data={"file_path": file_path}
+        )
+
         # Index to Elasticsearch - CRITICAL STEP
         es_success = False
         es_response = None
@@ -181,6 +202,16 @@ class PublisherAgent:
             logger.info(f"   ID: {es_response['_id']}")
             logger.info(f"   Result: {es_response['result']}")
             es_success = True
+
+            # Publish event: elasticsearch indexed
+            await self._publish_event(
+                event_type="elasticsearch_indexed",
+                story_id=story_id,
+                data={
+                    "index": self.es_index,
+                    "document_id": es_response['_id']
+                }
+            )
 
         except Exception as e:
             logger.error(f"❌ Elasticsearch indexing failed: {e}", exc_info=True)
@@ -219,6 +250,16 @@ class PublisherAgent:
             "elasticsearch_indexed": es_success
         }
         self.published_articles[story_id] = publication_record
+
+        # Publish event: publication completed
+        await self._publish_event(
+            event_type="publication_completed",
+            story_id=story_id,
+            data={
+                "file_path": file_path,
+                "elasticsearch_indexed": es_success
+            }
+        )
 
         if es_success:
             logger.info(f"✅ Publication workflow completed successfully (Elasticsearch + Local File)")
@@ -354,11 +395,8 @@ Return ONLY the JSON, no additional text."""
 
             response_text = message.content[0].text
 
-            # Extract JSON
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Use BaseAgent helper to strip markdown code blocks
+            response_text = self._strip_json_codeblocks(response_text)
 
             result = json.loads(response_text)
             tags = result.get("tags", [])
@@ -599,150 +637,8 @@ def create_app(host='localhost', port=8084):
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-    )    
-    # Add direct HTTP endpoints for React UI
-    from starlette.routing import Route
-    from starlette.responses import JSONResponse
-    
-    async def direct_get_status(request):
-        """Direct HTTP endpoint for publisheragent status"""
-        try:
-            data = await request.json()
-            agent = get_publisher_agent()
-            result = await agent.invoke(json.dumps(data))
-            return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-    
-    # Add clear endpoint
-    async def clear_all(request):
-        """Clear all published articles and reset to idle state"""
-        try:
-            publisher = get_publisher_agent()
-            publisher.published_articles = {}
-            publisher.total_published = 0
-            logger.info("🧹 Publisher: Cleared all published articles and reset to idle")
-            return {"status": "success", "message": "All published articles cleared"}
-        except Exception as e:
-            logger.error(f"Error clearing published articles: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    # Add article endpoint
-    async def get_article(request):
-        """Get published article by story_id"""
-        try:
-            story_id = request.path_params.get("story_id")
-            logger.info(f"📄 Article request for story_id: {story_id}")
-            publisher = get_publisher_agent()
-            
-            # Check if we have this article in our published articles
-            if story_id in publisher.published_articles:
-                logger.info(f"📄 Found article in published_articles: {story_id}")
-                article_data = publisher.published_articles[story_id]
-                return JSONResponse(article_data)
-            
-            # Try to read from articles directory
-            import os
-            articles_dir = "articles"
-            logger.info(f"📄 Searching articles directory: {articles_dir}")
-            if os.path.exists(articles_dir):
-                files = os.listdir(articles_dir)
-                logger.info(f"📄 Found {len(files)} files in articles directory")
-                for filename in files:
-                    if story_id in filename and filename.endswith('.md'):
-                        filepath = os.path.join(articles_dir, filename)
-                        logger.info(f"📄 Found matching file: {filepath}")
-                        try:
-                            with open(filepath, 'r', encoding='utf-8') as f:
-                                content = f.read()
-                            
-                            # Parse the markdown file to extract metadata
-                            lines = content.split('\n')
-                            headline = None
-                            topic = None
-                            angle = None
-                            word_count = None
-                            published_at = None
-                            
-                            # Find YAML frontmatter section
-                            frontmatter_start = -1
-                            frontmatter_end = -1
-                            for i, line in enumerate(lines):
-                                if line.strip() == '---':
-                                    if frontmatter_start == -1:
-                                        frontmatter_start = i
-                                    else:
-                                        frontmatter_end = i
-                                        break
-                            
-                            # Extract metadata from YAML frontmatter
-                            if frontmatter_start != -1 and frontmatter_end != -1:
-                                for i in range(frontmatter_start + 1, frontmatter_end):
-                                    line = lines[i].strip()
-                                    if ':' in line:
-                                        key, value = line.split(':', 1)
-                                        key = key.strip()
-                                        value = value.strip()
-                                        
-                                        if key == 'headline':
-                                            headline = value
-                                        elif key == 'title':
-                                            topic = value  # Use title as topic
-                                        elif key == 'story_id':
-                                            # Skip story_id
-                                            pass
-                                        elif key == 'word_count':
-                                            try:
-                                                word_count = int(value)
-                                            except ValueError:
-                                                pass
-                                        elif key == 'date':
-                                            published_at = value
-                            
-                            # Extract the article content (everything after the second ---)
-                            if frontmatter_end != -1:
-                                article_content = '\n'.join(lines[frontmatter_end + 1:]).strip()
-                            else:
-                                # Fallback: look for HEADLINE: and take everything after it
-                                content_start = 0
-                                for i, line in enumerate(lines):
-                                    if line.startswith('HEADLINE:'):
-                                        content_start = i
-                                        break
-                                article_content = '\n'.join(lines[content_start:]).strip()
-                            
-                            article_data = {
-                                "story_id": story_id,
-                                "headline": headline,
-                                "topic": topic,
-                                "angle": angle,
-                                "content": article_content,
-                                "word_count": word_count,
-                                "published_at": published_at,
-                                "filepath": filepath
-                            }
-                            logger.info(f"📄 Successfully parsed article: {story_id}")
-                            logger.info(f"📄 Article headline: {headline}")
-                            logger.info(f"📄 Article word count: {word_count}")
-                            return JSONResponse(article_data)
-                        except Exception as e:
-                            logger.error(f"Error reading article file {filepath}: {e}")
-                            continue
-            
-            logger.warning(f"📄 Article not found: {story_id}")
-            return JSONResponse({"status": "error", "message": f"Article {story_id} not found"}, status_code=404)
-            
-        except Exception as e:
-            logger.error(f"Error getting article {story_id}: {e}")
-            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-    
-    # Add routes
-    app.router.routes.extend([
-        Route("/get-status", direct_get_status, methods=["POST"]),
-        Route("/clear-all", clear_all, methods=["POST"]),
-        Route("/article/{story_id}", get_article, methods=["GET"]),
-    ])
-    
+    )
+
     return app
 
 

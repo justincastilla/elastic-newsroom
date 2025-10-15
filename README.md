@@ -87,20 +87,20 @@ python scripts/create_elasticsearch_index.py
 ### 4. Start All Agents
 ```bash
 # Start all 5 agents in the background
-./start_newsroom.sh
+./scripts/start_newsroom.sh
 
 # Or with hot reload for development
-./start_newsroom.sh --reload
+./scripts/start_newsroom.sh --reload
 
 # Start agents + React UI on port 3001
-./start_newsroom.sh --with-ui
+./scripts/start_newsroom.sh --with-ui
 
 # Stop all agents (and UI if running)
-./start_newsroom.sh --stop
+./scripts/start_newsroom.sh --stop
 ```
 
 **React UI** (if started with `--with-ui`):
-- Start: `cd react-ui && ./start.sh` or `./start_newsroom.sh --with-ui`
+- Start: `cd react-ui && ./start.sh` or `./scripts/start_newsroom.sh --with-ui`
 - Access: http://localhost:3001/
 - Features: Real-time agent monitoring, workflow visualization, live status updates
 
@@ -109,7 +109,7 @@ python scripts/create_elasticsearch_index.py
 **Option 1: React UI** (Recommended - Modern Interface)
 ```bash
 # Start all agents and React UI
-./start_newsroom.sh --with-ui
+./scripts/start_newsroom.sh --with-ui
 
 # Or start React UI separately (agents must be running)
 cd react-ui && ./start.sh
@@ -161,19 +161,26 @@ elastic-news/
 │   │   └── hooks/              # Custom React hooks
 │   ├── public/                 # Static assets
 │   └── package.json            # Node.js dependencies
+├── services/                    # Infrastructure services
+│   ├── event_hub.py             # Event broadcasting (SSE)
+│   └── article_api.py           # Article API for UI
 ├── scripts/                     # Utility scripts
-│   └── create_elasticsearch_index.py
-├── tests/                       # Test suite
-│   ├── test_newsroom_workflow_comprehensive.py  # End-to-end workflow test
-│   ├── test_elasticsearch_index.py              # ES index creation test
-│   └── test_archivist.py                        # Archivist connectivity test
+│   ├── create_elasticsearch_index.py  # ES index setup
+│   ├── start_newsroom.sh        # Start/stop all agents
+│   └── start_event_hub.sh       # Start Event Hub
+├── tests/                       # Test suite (pytest framework)
+│   ├── conftest.py              # Pytest fixtures
+│   ├── test_workflow_pytest.py  # Main workflow tests
+│   ├── test_with_mocks.py       # Mock-based tests
+│   ├── test_event_hub.py        # Event Hub tests
+│   └── mocks/                   # Mock implementations
 ├── docs/                        # Documentation
 │   ├── configuration-guide.md   # Environment setup
 │   ├── elasticsearch-schema.md  # Index mapping
 │   └── archivist-integration.md # Archivist setup
 ├── articles/                    # Published articles (auto-generated)
 ├── logs/                        # Agent logs (auto-generated)
-├── start_newsroom.sh            # Start/stop all agents
+├── Makefile                     # Build commands and shortcuts
 ├── requirements.txt             # Python dependencies
 ├── env.example                  # Environment template
 └── README.md                    # This file
@@ -240,11 +247,11 @@ User views completed article in Web UI
 
 ### Start/Stop Agents
 ```bash
-./start_newsroom.sh                      # Start all agents
-./start_newsroom.sh --reload             # Start agents with hot reload
-./start_newsroom.sh --with-ui            # Start agents + web UI
-./start_newsroom.sh --with-ui --reload   # Start agents + UI with hot reload
-./start_newsroom.sh --stop               # Stop all agents and UI
+./scripts/start_newsroom.sh                      # Start all agents
+./scripts/start_newsroom.sh --reload             # Start agents with hot reload
+./scripts/start_newsroom.sh --with-ui            # Start agents + web UI
+./scripts/start_newsroom.sh --with-ui --reload   # Start agents + UI with hot reload
+./scripts/start_newsroom.sh --stop               # Stop all agents and UI
 ```
 
 ### Web UI
@@ -268,20 +275,49 @@ tail -f logs/News_Chief.log   # Specific agent
 ```
 
 ### Run Tests
-```bash
-# Detailed workflow test with real-time monitoring (RECOMMENDED)
-python run_detailed_test.py
 
-# Or run the test directly
-python tests/test_newsroom_workflow_detailed.py
+**Modern Pytest Framework (RECOMMENDED)**
+```bash
+# Run tests with mocks (NO API KEYS NEEDED! ✨)
+make test               # Fast tests with mocks
+pytest tests/test_with_mocks.py -v  # Mock-specific tests
+
+# Run all tests including slow ones (with mocks)
+make test-all
+
+# Run with real services (requires API keys + running agents)
+USE_REAL_SERVICES=true make test
+
+# Run specific test types
+make test-unit          # Unit tests only
+make test-integration   # Integration tests
+make test-workflow      # Full workflow tests
+
+# Run with verbose output
+pytest -v -m "not slow"
+
+# See all commands
+make help
+```
+
+**🎯 Tests use mocks by default** - no Anthropic API key or Elasticsearch required!
+See [tests/mocks/README.md](tests/mocks/README.md) for mock documentation.
+
+**Legacy Test Scripts**
+```bash
+# Simple workflow test script
+./test_workflow.sh
+python tests/test_full_workflow.py
+
+# Comprehensive monitoring test
+python tests/test_newsroom_workflow_comprehensive.py
 
 # Other tests
 python tests/test_elasticsearch_index.py  # Elasticsearch index test
 python tests/test_archivist.py           # Archivist connectivity test
-
-# Full demonstration with setup verification
-python demo_workflow.py
 ```
+
+See [TESTING.md](TESTING.md) for detailed testing documentation.
 
 ### Individual Agents
 ```bash

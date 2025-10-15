@@ -26,6 +26,8 @@ PID_FILE=".newsroom_pids"
 
 # Agent configurations: name:port:module
 AGENTS=(
+    "Event Hub:8090:services.event_hub:app"
+    "Article API:8085:services.article_api:app"
     "News Chief:8080:agents.news_chief:app"
     "Reporter:8081:agents.reporter:app"
     "Editor:8082:agents.editor:app"
@@ -65,9 +67,9 @@ if [ "$1" == "--stop" ]; then
         rm "$PID_FILE"
     fi
 
-    # Also kill any processes still bound to the ports (including UI port 3000)
-    echo -e "${YELLOW}   Checking for processes on ports 8080-8084, 3000...${NC}"
-    for port in 8080 8081 8082 8083 8084 3000; do
+    # Also kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
+    echo -e "${YELLOW}   Checking for processes on ports 8080-8085, 8090, 3000...${NC}"
+    for port in 8080 8081 8082 8083 8084 8085 8090 3000; do
         PID=$(lsof -ti:$port 2>/dev/null)
         if [ -n "$PID" ]; then
             echo -e "${YELLOW}   Killing process on port $port (PID: $PID)...${NC}"
@@ -86,7 +88,7 @@ mkdir -p "$LOG_DIR"
 # Check if any ports are already in use
 echo -e "${BLUE}🔍 Checking for port conflicts...${NC}"
 PORTS_IN_USE=""
-for port in 8080 8081 8082 8083 8084; do
+for port in 8080 8081 8082 8083 8084 8085 8090; do
     if lsof -ti:$port > /dev/null 2>&1; then
         PORTS_IN_USE="$PORTS_IN_USE $port"
     fi
@@ -160,6 +162,8 @@ if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✅ All agents started successfully!${NC}"
     echo ""
     echo -e "${BLUE}📊 Agent Endpoints:${NC}"
+    echo -e "${BLUE}   Event Hub:   http://localhost:8090${NC}"
+    echo -e "${BLUE}   Article API: http://localhost:8085${NC}"
     echo -e "${BLUE}   News Chief:  http://localhost:8080${NC}"
     echo -e "${BLUE}   Reporter:    http://localhost:8081${NC}"
     echo -e "${BLUE}   Editor:      http://localhost:8082${NC}"

@@ -21,6 +21,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from utils import setup_logger, load_env_config, init_anthropic_client, extract_json_from_llm_response, run_agent_server
+from agents.base_agent import BaseAgent
 
 # Load environment variables
 load_env_config()
@@ -31,15 +32,18 @@ logger = setup_logger("EDITOR")
 # Singleton instance for maintaining state across requests
 _editor_agent_instance = None
 
-class EditorAgent:
+class EditorAgent(BaseAgent):
     """Editor Agent - Reviews drafts and provides editorial feedback"""
 
     def __init__(self):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.reviews: Dict[str, Dict[str, Any]] = {}
         self.drafts_under_review: Dict[str, Dict[str, Any]] = {}
-        
-        # Initialize Anthropic client using centralized utility
-        self.anthropic_client = init_anthropic_client(logger)
+
+        # Initialize Anthropic client using centralized utility (from BaseAgent)
+        self._init_anthropic_client()
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -131,6 +135,16 @@ class EditorAgent:
             "review_status": "reviewing"
         }
 
+        # Publish event: review started
+        await self._publish_event(
+            event_type="review_started",
+            story_id=story_id,
+            data={
+                "word_count": draft.get("word_count"),
+                "target_length": draft.get("assignment", {}).get("target_length")
+            }
+        )
+
         # Perform review
         try:
             logger.info("🤖 Calling Anthropic API to review article...")
@@ -153,6 +167,16 @@ class EditorAgent:
             # Update draft status
             self.drafts_under_review[story_id]["review_status"] = "completed"
             self.drafts_under_review[story_id]["review_id"] = review_id
+
+            # Publish event: review completed
+            await self._publish_event(
+                event_type="review_completed",
+                story_id=story_id,
+                data={
+                    "approval_status": review_result.get("approval_status"),
+                    "suggested_edits_count": len(review_result.get("suggested_edits", []))
+                }
+            )
 
             logger.info(f"✅ Review stored successfully")
             logger.info(f"   Review ID: {review_id}")
@@ -445,7 +469,7 @@ def create_app(host='localhost', port=8082):
     )
 
     app = server.build()
-    
+
     # Add CORS middleware for React UI
     app.add_middleware(
         CORSMiddleware,
@@ -453,40 +477,8 @@ def create_app(host='localhost', port=8082):
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-    )    
-    # Add direct HTTP endpoints for React UI
-    from starlette.routing import Route
-    from starlette.responses import JSONResponse
-    
-    async def direct_get_status(request):
-        """Direct HTTP endpoint for editor status"""
-        try:
-            data = await request.json()
-            agent = get_editor_agent()
-            result = await agent.invoke(json.dumps(data))
-            return JSONResponse(result)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-    
-    # Add clear endpoint
-    async def clear_all(request):
-        """Clear all reviews and reset to idle state"""
-        try:
-            editor = get_editor_agent()
-            editor.reviews = {}
-            logger.info("🧹 Editor: Cleared all reviews and reset to idle")
-            return {"status": "success", "message": "All reviews cleared"}
-        except Exception as e:
-            logger.error(f"Error clearing reviews: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    # Add routes
-    app.router.routes.extend([
-        Route("/get-status", direct_get_status, methods=["POST"]),
-        Route("/clear-all", clear_all, methods=["POST"]),
-    ])
-    
-    
+    )
+
     return app
 
 

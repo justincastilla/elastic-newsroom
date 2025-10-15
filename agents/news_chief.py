@@ -20,17 +20,21 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
+from a2a.client import create_text_message_object
 from utils import setup_logger, run_agent_server
+from agents.base_agent import BaseAgent
 
 # Configure logging using centralized utility
 logger = setup_logger("NEWS_CHIEF")
 
 
-class NewsChiefAgent:
+class NewsChiefAgent(BaseAgent):
     """News Chief Agent - Coordinates newsroom workflow and assigns stories"""
 
     def __init__(self, reporter_url: Optional[str] = None, editor_url: Optional[str] = None, publisher_url: Optional[str] = None):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.active_stories: Dict[str, Dict[str, Any]] = {}
         self.available_reporters: List[str] = []
         self.reporter_url = reporter_url or "http://localhost:8081"
@@ -153,6 +157,18 @@ class NewsChiefAgent:
             story_assignment["status"] = "assigned"
 
         self.active_stories[story_id] = story_assignment
+
+        # Publish event: story assigned
+        await self._publish_event(
+            event_type="story_assigned",
+            story_id=story_id,
+            data={
+                "topic": topic,
+                "priority": priority,
+                "target_length": target_length,
+                "angle": story_assignment.get("angle", "")
+            }
+        )
 
         logger.info(f"✅ Story created: {story_id}")
         logger.info(f"   Topic: {story_assignment['topic']}")
@@ -278,19 +294,22 @@ class NewsChiefAgent:
         # Update story status
         story["status"] = "under_review"
         story["updated_at"] = datetime.now().isoformat()
-        
+
+        # Publish event: editor review requested
+        await self._publish_event(
+            event_type="editor_review_requested",
+            story_id=story_id,
+            data={"word_count": draft.get("word_count")}
+        )
+
         # Send to Editor
         try:
             async with httpx.AsyncClient(timeout=300.0) as http_client:
-                # Discover Editor agent
-                card_resolver = A2ACardResolver(http_client, self.editor_url)
-                editor_card = await card_resolver.get_agent_card()
-                
-                # Create A2A client
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                editor_client = client_factory.create(editor_card)
-                
+                # Create A2A client using BaseAgent helper
+                editor_client, _ = await self._create_a2a_client(
+                    http_client, self.editor_url, "Editor"
+                )
+
                 # Send review request
                 review_request = {
                     "action": "review_draft",
@@ -353,15 +372,11 @@ class NewsChiefAgent:
         # Send to Reporter for revisions
         try:
             async with httpx.AsyncClient(timeout=300.0) as http_client:
-                # Discover Reporter agent
-                card_resolver = A2ACardResolver(http_client, self.reporter_url)
-                reporter_card = await card_resolver.get_agent_card()
-                
-                # Create A2A client
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                reporter_client = client_factory.create(reporter_card)
-                
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
+
                 # Send revision request
                 revision_request = {
                     "action": "apply_edits",
@@ -426,19 +441,22 @@ class NewsChiefAgent:
         # Update story status
         story["status"] = "publishing"
         story["updated_at"] = datetime.now().isoformat()
-        
+
+        # Publish event: publication requested
+        await self._publish_event(
+            event_type="publication_requested",
+            story_id=story_id,
+            data={"word_count": draft.get("word_count")}
+        )
+
         # Send to Publisher
         try:
             async with httpx.AsyncClient(timeout=300.0) as http_client:
-                # Discover Publisher agent
-                card_resolver = A2ACardResolver(http_client, self.publisher_url)
-                publisher_card = await card_resolver.get_agent_card()
-                
-                # Create A2A client
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                publisher_client = client_factory.create(publisher_card)
-                
+                # Create A2A client using BaseAgent helper
+                publisher_client, _ = await self._create_a2a_client(
+                    http_client, self.publisher_url, "Publisher"
+                )
+
                 # Send publication request
                 publish_request = {
                     "action": "publish_article",
@@ -489,14 +507,10 @@ class NewsChiefAgent:
 
             # Create a new HTTP client for this async task
             async with httpx.AsyncClient(timeout=300.0) as http_client:
-                # Discover Reporter agent
-                card_resolver = A2ACardResolver(http_client, self.reporter_url)
-                reporter_card = await card_resolver.get_agent_card()
-
-                # Create A2A client
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                reporter_client = client_factory.create(reporter_card)
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
 
                 # Send write_article command
                 write_request = {
@@ -535,17 +549,10 @@ class NewsChiefAgent:
         """Send story assignment to Reporter agent via A2A"""
         try:
             async with httpx.AsyncClient(timeout=60.0) as http_client:
-                # Discover Reporter agent
-                logger.info(f"🔍 Discovering Reporter agent at {self.reporter_url}")
-                card_resolver = A2ACardResolver(http_client, self.reporter_url)
-                reporter_card = await card_resolver.get_agent_card()
-                logger.info(f"✅ Found Reporter: {reporter_card.name} (v{reporter_card.version})")
-
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                reporter_client = client_factory.create(reporter_card)
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
 
                 # Send accept_assignment task to Reporter
                 request = {
@@ -753,7 +760,7 @@ def create_app(host='localhost', port=8080):
     )
 
     app = server.build()
-    
+
     # Add CORS middleware for React UI
     app.add_middleware(
         CORSMiddleware,
@@ -762,62 +769,48 @@ def create_app(host='localhost', port=8080):
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Add direct HTTP endpoints for React UI
+
+    # Add minimal UI endpoints (simple wrappers around invoke())
     from starlette.routing import Route
     from starlette.responses import JSONResponse
-    
-    async def direct_assign_story(request):
-        """Direct HTTP endpoint for story assignment"""
+
+    async def ui_assign_story(request):
+        """UI endpoint for story assignment"""
         try:
             data = await request.json()
             agent = get_news_chief_agent()
             result = await agent.invoke(json.dumps(data))
             return JSONResponse(result)
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-    
-    async def direct_get_story_status(request):
-        """Direct HTTP endpoint for story status"""
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def ui_story_status(request):
+        """UI endpoint for story status"""
         try:
             data = await request.json()
             agent = get_news_chief_agent()
             result = await agent.invoke(json.dumps(data))
             return JSONResponse(result)
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-    
-    async def direct_list_active_stories(request):
-        """Direct HTTP endpoint for listing active stories"""
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def ui_active_stories(request):
+        """UI endpoint for active stories list"""
         try:
             data = await request.json()
             agent = get_news_chief_agent()
             result = await agent.invoke(json.dumps(data))
             return JSONResponse(result)
         except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
-    
-    # Add clear endpoint
-    async def clear_all(request):
-        """Clear all stories and reset to idle state"""
-        try:
-            news_chief = get_news_chief_agent()
-            news_chief.active_stories = {}
-            news_chief.story_counter = 0
-            logger.info("🧹 News Chief: Cleared all stories and reset to idle")
-            return {"status": "success", "message": "All stories cleared"}
-        except Exception as e:
-            logger.error(f"Error clearing stories: {e}")
-            return {"status": "error", "message": str(e)}
-    
-    # Add routes
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    # Add UI routes
     app.router.routes.extend([
-        Route("/assign-story", direct_assign_story, methods=["POST"]),
-        Route("/story-status", direct_get_story_status, methods=["POST"]),
-        Route("/active-stories", direct_list_active_stories, methods=["POST"]),
-        Route("/clear-all", clear_all, methods=["POST"]),
+        Route("/assign-story", ui_assign_story, methods=["POST"]),
+        Route("/story-status", ui_story_status, methods=["POST"]),
+        Route("/active-stories", ui_active_stories, methods=["POST"]),
     ])
-    
+
     return app
 
 

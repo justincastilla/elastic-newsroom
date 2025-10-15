@@ -1,7 +1,28 @@
 import React from 'react';
-import { CheckCircle, Clock, AlertCircle, Loader } from 'lucide-react';
+import { CheckCircle, Clock, AlertCircle, Loader, ExternalLink } from 'lucide-react';
 
 const WorkflowProgress = ({ workflowProgress, status }) => {
+  const handleViewArticle = () => {
+    // Get story_id from multiple possible locations
+    const storyId =
+      status?.story_id ||
+      workflowProgress?.story_id ||
+      status?.newsChief?.story?.story_id;
+
+    console.log('View Article clicked - story_id:', storyId);
+
+    if (storyId) {
+      console.log('Navigating to /article/' + storyId);
+      // Navigate to article viewer
+      window.history.pushState({}, '', `/article/${storyId}`);
+      // Manually trigger popstate event to notify App.js of route change
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } else {
+      console.error('No story_id found to view article');
+      console.log('Status object:', status);
+      console.log('Workflow progress object:', workflowProgress);
+    }
+  };
   const getStepIcon = (stepStatus) => {
     switch (stepStatus) {
       case 'completed':
@@ -82,11 +103,20 @@ const WorkflowProgress = ({ workflowProgress, status }) => {
 
       {workflowProgress.isComplete && (
         <div className="mt-6 p-4 bg-success-50 border border-success-200 rounded-lg">
-          <div className="flex items-center">
-            <CheckCircle className="h-5 w-5 text-success-600 mr-2" />
-            <span className="text-success-800 font-medium">
-              Article workflow completed successfully!
-            </span>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center">
+              <CheckCircle className="h-5 w-5 text-success-600 mr-2" />
+              <span className="text-success-800 font-medium">
+                Article workflow completed successfully!
+              </span>
+            </div>
+            <button
+              onClick={handleViewArticle}
+              className="inline-flex items-center px-4 py-2 bg-success-600 text-white rounded-lg hover:bg-success-700 transition-colors font-medium text-sm"
+            >
+              <ExternalLink className="h-4 w-4 mr-2" />
+              View Article
+            </button>
           </div>
         </div>
       )}

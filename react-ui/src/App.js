@@ -24,10 +24,14 @@ function App() {
   useEffect(() => {
     const handleRouteChange = () => {
       const path = window.location.pathname;
+      console.log('Route change detected - path:', path);
+
       if (path.startsWith('/article/')) {
         const storyId = path.split('/article/')[1];
+        console.log('Setting viewingArticle to:', storyId);
         setViewingArticle(storyId);
       } else {
+        console.log('Clearing viewingArticle');
         setViewingArticle(null);
       }
     };
