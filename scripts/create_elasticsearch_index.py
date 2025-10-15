@@ -100,8 +100,12 @@ def create_index():
     settings = es.indices.get_settings(index=index_name)
 
     print(f"✅ Index verified:")
-    print(f"   Shards: {settings[index_name]['settings']['index']['number_of_shards']}")
-    print(f"   Replicas: {settings[index_name]['settings']['index']['number_of_replicas']}")
+    # Get shards/replicas safely (they might be in different locations)
+    index_settings = settings[index_name]['settings']['index']
+    shards = index_settings.get('number_of_shards', 'default')
+    replicas = index_settings.get('number_of_replicas', 'default')
+    print(f"   Shards: {shards}")
+    print(f"   Replicas: {replicas}")
 
     field_count = len(mapping[index_name]['mappings']['properties'])
     print(f"   Mapped fields: {field_count}")

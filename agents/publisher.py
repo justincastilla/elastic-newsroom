@@ -13,44 +13,36 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
-import uvicorn
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import FileResponse
 from elasticsearch import Elasticsearch
-from anthropic import Anthropic
-from dotenv import dotenv_values
-
-# Load environment variables
-env_config = dotenv_values('.env')
-if env_config:
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+from agents.base_agent import BaseAgent
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [PUBLISHER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_env_config()
 
+# Configure logging using centralized utility
+logger = setup_logger("PUBLISHER")
 
-class PublisherAgent:
+# Singleton instance for maintaining state across requests
+_publisher_agent_instance = None
+
+class PublisherAgent(BaseAgent):
     """Publisher Agent - Publishes articles to Elasticsearch and manages deployment"""
 
     def __init__(self):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.published_articles: Dict[str, Dict[str, Any]] = {}
         self.es_client = None
-        self.anthropic_client = None
         self.es_index = os.getenv("ELASTIC_ARCHIVIST_INDEX", "news_archive")
 
         # Initialize Elasticsearch client
@@ -74,13 +66,12 @@ class PublisherAgent:
         else:
             logger.warning("⚠️  Elasticsearch credentials not configured")
 
-        # Initialize Anthropic client for tag generation
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-            logger.info("✅ Anthropic client initialized (for tag generation)")
+        # Initialize Anthropic client using centralized utility (from BaseAgent)
+        self._init_anthropic_client()
+        if self.anthropic_client:
+            logger.info("(for tag generation)")
         else:
-            logger.warning("⚠️  ANTHROPIC_API_KEY not set - tags will be empty")
+            logger.warning("⚠️  Tags will be empty")
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -93,13 +84,17 @@ class PublisherAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
             action = query_data.get("action")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action != "get_status":
+                logger.info(f"🎯 Action: {action}")
 
             if action == "publish_article":
                 return await self._publish_article(query_data)
@@ -140,6 +135,17 @@ class PublisherAgent:
             }
 
         story_id = article_data.get("story_id")
+
+        # Publish event: publication started
+        await self._publish_event(
+            event_type="publication_started",
+            story_id=story_id,
+            data={
+                "headline": article_data.get("headline"),
+                "word_count": article_data.get("word_count")
+            }
+        )
+
         logger.info(f"📋 Publication details:")
         logger.info(f"   Story ID: {story_id}")
         logger.info(f"   Headline: {article_data.get('headline', 'N/A')[:60]}...")
@@ -169,27 +175,49 @@ class PublisherAgent:
         build_number = f"#{int(time.time()) % 10000}"
         logger.info(f"✅ [MOCK CI/CD] Build {build_number} completed successfully")
 
+        # ALWAYS save to local file first (fallback if Elasticsearch fails)
+        logger.info(f"💾 Saving article to local file...")
+        file_path = await self._save_article_to_file(article_data, tags, categories)
+        logger.info(f"✅ Article saved to: {file_path}")
+
+        # Publish event: file saved
+        await self._publish_event(
+            event_type="file_saved",
+            story_id=story_id,
+            data={"file_path": file_path}
+        )
+
         # Index to Elasticsearch - CRITICAL STEP
+        es_success = False
+        es_response = None
         logger.info(f"📊 Indexing article to Elasticsearch ({self.es_index})...")
         try:
-            response = self.es_client.index(
+            es_response = self.es_client.index(
                 index=self.es_index,
                 id=story_id,  # Use story_id as document ID
                 document=es_document
             )
             logger.info(f"✅ Article indexed to Elasticsearch")
-            logger.info(f"   Index: {response['_index']}")
-            logger.info(f"   ID: {response['_id']}")
-            logger.info(f"   Result: {response['result']}")
+            logger.info(f"   Index: {es_response['_index']}")
+            logger.info(f"   ID: {es_response['_id']}")
+            logger.info(f"   Result: {es_response['result']}")
+            es_success = True
+
+            # Publish event: elasticsearch indexed
+            await self._publish_event(
+                event_type="elasticsearch_indexed",
+                story_id=story_id,
+                data={
+                    "index": self.es_index,
+                    "document_id": es_response['_id']
+                }
+            )
 
         except Exception as e:
-            logger.error(f"❌ CRITICAL: Failed to index to Elasticsearch: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to index article to Elasticsearch: {str(e)}",
-                "story_id": story_id,
-                "stage": "elasticsearch_indexing"
-            }
+            logger.error(f"❌ Elasticsearch indexing failed: {e}", exc_info=True)
+            logger.warning(f"⚠️  Article saved to local file but NOT indexed to Elasticsearch")
+            # Don't return error - continue with local file publication
+            es_success = False
 
         # Mock CI/CD - Step 2: Deploy
         logger.info("🚀 [MOCK CI/CD] Deploying to production...")
@@ -211,35 +239,58 @@ class PublisherAgent:
             "story_id": story_id,
             "headline": article_data.get("headline"),
             "published_at": datetime.now().isoformat(),
-            "es_index": self.es_index,
-            "es_document_id": response['_id'],
+            "file_path": file_path,
+            "es_index": self.es_index if es_success else None,
+            "es_document_id": es_response['_id'] if es_success else None,
             "build_number": build_number,
             "deployment_url": f"https://newsroom.example.com/articles/{article_data.get('url_slug', story_id)}",
             "subscribers_notified": subscriber_count,
             "tags": tags,
-            "categories": categories
+            "categories": categories,
+            "elasticsearch_indexed": es_success
         }
         self.published_articles[story_id] = publication_record
 
-        logger.info(f"✅ Publication workflow completed successfully")
+        # Publish event: publication completed
+        await self._publish_event(
+            event_type="publication_completed",
+            story_id=story_id,
+            data={
+                "file_path": file_path,
+                "elasticsearch_indexed": es_success
+            }
+        )
+
+        if es_success:
+            logger.info(f"✅ Publication workflow completed successfully (Elasticsearch + Local File)")
+        else:
+            logger.info(f"✅ Publication workflow completed (Local File Only - Elasticsearch indexing failed)")
         logger.info(f"   Total published articles: {len(self.published_articles)}")
 
-        return {
+        result = {
             "status": "success",
             "message": f"Article '{article_data.get('headline')}' published successfully",
             "story_id": story_id,
             "published_at": publication_record["published_at"],
-            "elasticsearch": {
-                "index": self.es_index,
-                "document_id": response['_id'],
-                "result": response['result']
-            },
+            "file_path": file_path,
             "build_number": build_number,
             "deployment_url": publication_record["deployment_url"],
             "subscribers_notified": subscriber_count,
             "tags": tags,
             "categories": categories
         }
+
+        # Include Elasticsearch info only if successful
+        if es_success:
+            result["elasticsearch"] = {
+                "index": self.es_index,
+                "document_id": es_response['_id'],
+                "result": es_response['result']
+            }
+        else:
+            result["elasticsearch_warning"] = "Article not indexed to Elasticsearch (saved to local file only)"
+
+        return result
 
     async def _unpublish_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Unpublish article from Elasticsearch (set status to unpublished)"""
@@ -344,11 +395,8 @@ Return ONLY the JSON, no additional text."""
 
             response_text = message.content[0].text
 
-            # Extract JSON
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Use BaseAgent helper to strip markdown code blocks
+            response_text = self._strip_json_codeblocks(response_text)
 
             result = json.loads(response_text)
             tags = result.get("tags", [])
@@ -359,6 +407,55 @@ Return ONLY the JSON, no additional text."""
         except Exception as e:
             logger.error(f"❌ Failed to generate tags/categories: {e}")
             return [], []
+
+    async def _save_article_to_file(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> str:
+        """Save article to local markdown file"""
+        story_id = article_data.get("story_id")
+        topic = article_data.get("topic", "article")
+        content = article_data.get("content", "")
+        headline = article_data.get("headline", "Untitled")
+
+        # Create articles directory if it doesn't exist
+        articles_dir = "articles"
+        os.makedirs(articles_dir, exist_ok=True)
+
+        # Generate filename from topic and story_id
+        filename = topic.lower().replace(" ", "-").replace(":", "").replace(",", "")
+        filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_'))
+        filepath = os.path.join(articles_dir, f"{filename}-{story_id}.md")
+
+        # Build markdown content with metadata
+        markdown_content = f"""---
+title: {topic}
+story_id: {story_id}
+headline: {headline}
+author: Elastic News Reporter Agent
+date: {datetime.now().strftime('%Y-%m-%d')}
+word_count: {article_data.get('word_count')}
+tags: {', '.join(tags)}
+categories: {', '.join(categories)}
+---
+
+{content}
+
+---
+
+**Article Metadata:**
+- Story ID: {story_id}
+- Published: {datetime.now().isoformat()}
+- Word Count: {article_data.get('word_count')}
+- Tags: {', '.join(tags)}
+- Categories: {', '.join(categories)}
+
+*Generated by Elastic News - A Multi-Agent AI Newsroom*
+*Powered by Anthropic Claude Sonnet 4 and A2A Protocol*
+"""
+
+        # Write to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+
+        return filepath
 
     def _build_es_document(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> Dict[str, Any]:
         """Build Elasticsearch document from article data"""
@@ -387,7 +484,6 @@ Return ONLY the JSON, no additional text."""
             "published_at": article_data.get("published_at") or datetime.now().isoformat(),
             "created_at": article_data.get("created_at"),
             "updated_at": datetime.now().isoformat(),
-            "deadline": article_data.get("deadline"),
             "author": article_data.get("author", "Reporter Agent"),
             "editor": article_data.get("editor", "Editor Agent"),
             "tags": tags,
@@ -429,11 +525,20 @@ Return ONLY the JSON, no additional text."""
             }
 
 
+def get_publisher_agent() -> PublisherAgent:
+    """Get singleton PublisherAgent instance to maintain state across requests"""
+    global _publisher_agent_instance
+    if _publisher_agent_instance is None:
+        _publisher_agent_instance = PublisherAgent()
+    return _publisher_agent_instance
+
+
 class PublisherAgentExecutor(AgentExecutor):
     """AgentExecutor for the Publisher agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = PublisherAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_publisher_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -457,7 +562,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
     """Create the Publisher agent card"""
     return AgentCard(
         name="Publisher",
-        description="Publishes finalized articles to Elasticsearch, handles CI/CD deployment, and sends CRM notifications",
+        description="Publishes finalized articles to Elasticsearch, handles CI/CD deployment, and sends CRM notifications. Works through News Chief for workflow coordination.",
         url=f"http://{host}:{port}",
         version="1.0.0",
         preferred_transport="JSONRPC",
@@ -523,7 +628,18 @@ def create_app(host='localhost', port=8084):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+    
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    return app
 
 
 # Create default app instance for uvicorn
@@ -536,30 +652,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Publisher Agent server."""
-    try:
-        logger.info(f'Starting Publisher Agent server on {host}:{port}')
-        print(f"📰 Publisher Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.publisher:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Publisher",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.publisher:app" if reload else None
+    )
 
 
 if __name__ == "__main__":

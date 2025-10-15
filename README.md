@@ -27,8 +27,9 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
 
 2. **Reporter** (Port 8081)
    - Writes articles based on research data
-   - Consults Archivist for historical context
-   - Integrates research findings into cohesive narratives
+   - Consults Archivist via Elastic Conversational API for historical context
+   - Integrates research findings and historical references into cohesive narratives
+   - Generates structured article data (headline, content, word count)
 
 3. **Researcher** (Port 8083)
    - Gathers facts, statistics, and background information
@@ -46,19 +47,23 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
    - Saves articles as markdown files
    - Updates article status to "published"
 
-#### External Agent (A2A Protocol)
+#### External Agent (Elastic Cloud)
 
 - **Archivist Agent**
   - Hosted on Elastic Cloud (Kibana Agent Builder)
-  - Searches historical articles via A2A protocol
+  - Searches historical articles via Elastic Conversational API
   - Provides context about past coverage
-  - Accessed via agent card URL
+  - Uses `platform.core.search` skill to query `news_archive` index
+  - Returns article highlights, references, and reasoning
 
 ## Quick Start
 
 ### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
+
+# Optional: Install React UI dependencies
+cd react-ui && npm install && cd ..
 ```
 
 ### 2. Configure Environment
@@ -82,26 +87,61 @@ python scripts/create_elasticsearch_index.py
 ### 4. Start All Agents
 ```bash
 # Start all 5 agents in the background
-./start_newsroom.sh
+./scripts/start_newsroom.sh
 
 # Or with hot reload for development
-./start_newsroom.sh --reload
+./scripts/start_newsroom.sh --reload
 
-# Stop all agents
-./start_newsroom.sh --stop
+# Start agents + React UI on port 3001
+./scripts/start_newsroom.sh --with-ui
+
+# Stop all agents (and UI if running)
+./scripts/start_newsroom.sh --stop
 ```
 
+**React UI** (if started with `--with-ui`):
+- Start: `cd react-ui && ./start.sh` or `./scripts/start_newsroom.sh --with-ui`
+- Access: http://localhost:3001/
+- Features: Real-time agent monitoring, workflow visualization, live status updates
+
 ### 5. Run the Workflow
+
+**Option 1: React UI** (Recommended - Modern Interface)
 ```bash
-python tests/test_newsroom_workflow.py
+# Start all agents and React UI
+./scripts/start_newsroom.sh --with-ui
+
+# Or start React UI separately (agents must be running)
+cd react-ui && ./start.sh
+
+# Navigate to http://localhost:3001
+# Fill out the story assignment form
+# Watch real-time agent activity and workflow progress
+# View completed articles with live status updates
+```
+
+**Option 2: Test Script**
+```bash
+# Run with real-time monitoring and detailed output
+python run_live_test.py
+
+# Or run the comprehensive test directly
+python tests/test_newsroom_workflow_comprehensive.py
 ```
 
 This will:
 1. Assign a story via News Chief
 2. Have Researcher gather information
-3. Have Reporter write the article (consulting Archivist)
+3. Have Reporter write the article (consulting Archivist via Elastic Conversational API)
 4. Have Editor review and refine the article
 5. Have Publisher index to Elasticsearch and save to file
+
+**Option 4: Archivist Diagnostics**
+```bash
+python test_archivist.py
+```
+
+Tests Archivist connectivity and search functionality directly.
 
 ## Project Structure
 
@@ -114,19 +154,33 @@ elastic-news/
 │   ├── researcher.py           # Research gatherer (port 8083)
 │   ├── editor.py               # Content reviewer (port 8082)
 │   └── publisher.py            # Article publisher (port 8084)
+├── react-ui/                    # React UI
+│   ├── src/                    # React source code
+│   │   ├── components/         # UI components
+│   │   ├── services/           # API services
+│   │   └── hooks/              # Custom React hooks
+│   ├── public/                 # Static assets
+│   └── package.json            # Node.js dependencies
+├── services/                    # Infrastructure services
+│   ├── event_hub.py             # Event broadcasting (SSE)
+│   └── article_api.py           # Article API for UI
 ├── scripts/                     # Utility scripts
-│   └── create_elasticsearch_index.py
-├── tests/                       # Test suite
-│   ├── test_newsroom_workflow.py    # End-to-end workflow test
-│   └── test_elasticsearch_index.py  # ES index creation test
+│   ├── create_elasticsearch_index.py  # ES index setup
+│   ├── start_newsroom.sh        # Start/stop all agents
+│   └── start_event_hub.sh       # Start Event Hub
+├── tests/                       # Test suite (pytest framework)
+│   ├── conftest.py              # Pytest fixtures
+│   ├── test_workflow_pytest.py  # Main workflow tests
+│   ├── test_with_mocks.py       # Mock-based tests
+│   ├── test_event_hub.py        # Event Hub tests
+│   └── mocks/                   # Mock implementations
 ├── docs/                        # Documentation
 │   ├── configuration-guide.md   # Environment setup
 │   ├── elasticsearch-schema.md  # Index mapping
-│   ├── news-chief-agent.md      # News Chief details
 │   └── archivist-integration.md # Archivist setup
 ├── articles/                    # Published articles (auto-generated)
 ├── logs/                        # Agent logs (auto-generated)
-├── start_newsroom.sh            # Start/stop all agents
+├── Makefile                     # Build commands and shortcuts
 ├── requirements.txt             # Python dependencies
 ├── env.example                  # Environment template
 └── README.md                    # This file
@@ -138,12 +192,17 @@ elastic-news/
 
 - **Multi-Agent Coordination**: 5 agents communicate via A2A protocol
 - **Complete Workflow**: End-to-end article production from assignment to publication
-- **Elasticsearch Integration**: Historical article indexing and search
-- **External Agent Integration**: Optional Archivist agent via A2A protocol
+- **React UI**: Modern React interface with live agent monitoring and workflow visualization (port 3001)
+- **Elasticsearch Integration**: Historical article indexing and search via `news_archive` index
+- **Elastic Archivist Integration**: Cloud-based search agent via Conversational API
 - **Claude Sonnet 4**: AI-powered research, writing, and editing
 - **Process Management**: Single command to start/stop all agents
-- **Comprehensive Logging**: Individual log files for each agent
-- **Hot Reload Support**: Development mode with auto-reload
+- **Comprehensive Logging**: Individual log files for each agent with detailed diagnostics
+- **Hot Reload Support**: Development mode with auto-reload for agents
+- **Article Data Flow**: Structured article data (headline, content, word count) passed through workflow
+- **Real-time Monitoring**: Live agent status updates and workflow progress visualization
+- **Archivist Diagnostics**: Standalone test tool to verify Elastic Cloud connectivity
+- **Comprehensive Workflow Test**: Real-time monitoring with detailed agent activity display
 
 🔄 **In Progress**
 
@@ -155,25 +214,59 @@ elastic-news/
 
 - [Configuration Guide](docs/configuration-guide.md) - Environment setup and API configuration
 - [Elasticsearch Schema](docs/elasticsearch-schema.md) - Index mapping and field definitions
-- [News Chief Agent](docs/news-chief-agent.md) - Coordinator agent details
 - [Archivist Integration](docs/archivist-integration.md) - External agent setup
 
 ## Workflow Example
 
 ```
-News Chief assigns story → Researcher gathers data →
-Reporter writes article (consults Archivist) →
-Editor reviews and refines → Publisher indexes to Elasticsearch
+User submits story via React UI (http://localhost:3001)
+    ↓
+News Chief assigns story to Reporter
+    ↓
+Reporter delegates to Researcher for background information
+    ↓
+Researcher returns structured research data (5 key questions/answers)
+    ↓
+Reporter consults Archivist via Elastic Conversational API
+  - Archivist searches news_archive index
+  - Returns historical article highlights and references
+    ↓
+Reporter writes article integrating research + historical context
+  - Generates headline, content, and word count
+    ↓
+Editor reviews article for quality and SEO
+  - Checks word count, grammar, tone
+  - Generates tags and metadata
+    ↓
+Publisher indexes article to Elasticsearch + saves markdown file
+    ↓
+User views completed article in Web UI
 ```
 
 ## Commands
 
 ### Start/Stop Agents
 ```bash
-./start_newsroom.sh           # Start all agents
-./start_newsroom.sh --reload  # Start with hot reload
-./start_newsroom.sh --stop    # Stop all agents
+./scripts/start_newsroom.sh                      # Start all agents
+./scripts/start_newsroom.sh --reload             # Start agents with hot reload
+./scripts/start_newsroom.sh --with-ui            # Start agents + web UI
+./scripts/start_newsroom.sh --with-ui --reload   # Start agents + UI with hot reload
+./scripts/start_newsroom.sh --stop               # Stop all agents and UI
 ```
+
+### Web UI
+```bash
+./start_ui.sh                    # Start Mesop UI only (agents must be running)
+open http://localhost:3000       # Open Mesop UI in browser
+```
+
+### React UI
+```bash
+cd react-ui && ./start.sh        # Start React UI (agents must be running)
+open http://localhost:3001       # Open React UI in browser
+```
+
+**Hot Reload:** React UI has hot reload enabled by default. Changes to `react-ui/` files reload automatically in development mode.
 
 ### View Logs
 ```bash
@@ -182,10 +275,49 @@ tail -f logs/News_Chief.log   # Specific agent
 ```
 
 ### Run Tests
+
+**Modern Pytest Framework (RECOMMENDED)**
 ```bash
-python tests/test_newsroom_workflow.py    # End-to-end workflow
-python tests/test_elasticsearch_index.py  # Elasticsearch index test
+# Run tests with mocks (NO API KEYS NEEDED! ✨)
+make test               # Fast tests with mocks
+pytest tests/test_with_mocks.py -v  # Mock-specific tests
+
+# Run all tests including slow ones (with mocks)
+make test-all
+
+# Run with real services (requires API keys + running agents)
+USE_REAL_SERVICES=true make test
+
+# Run specific test types
+make test-unit          # Unit tests only
+make test-integration   # Integration tests
+make test-workflow      # Full workflow tests
+
+# Run with verbose output
+pytest -v -m "not slow"
+
+# See all commands
+make help
 ```
+
+**🎯 Tests use mocks by default** - no Anthropic API key or Elasticsearch required!
+See [tests/mocks/README.md](tests/mocks/README.md) for mock documentation.
+
+**Legacy Test Scripts**
+```bash
+# Simple workflow test script
+./test_workflow.sh
+python tests/test_full_workflow.py
+
+# Comprehensive monitoring test
+python tests/test_newsroom_workflow_comprehensive.py
+
+# Other tests
+python tests/test_elasticsearch_index.py  # Elasticsearch index test
+python tests/test_archivist.py           # Archivist connectivity test
+```
+
+See [TESTING.md](TESTING.md) for detailed testing documentation.
 
 ### Individual Agents
 ```bash
@@ -205,13 +337,42 @@ Each agent exposes its capabilities via agent card:
 - Researcher: `http://localhost:8083/.well-known/agent-card.json`
 - Publisher: `http://localhost:8084/.well-known/agent-card.json`
 
+## Archivist Integration
+
+The Reporter agent integrates with an Elastic Cloud Archivist agent to search historical articles:
+
+**API Endpoint**: `POST /api/agent_builder/converse`
+
+**Request Format**:
+```json
+{
+  "input": "Find historical news articles about: {search_query}",
+  "agent_id": "archive-agent"
+}
+```
+
+**Required Headers**:
+- `Authorization: ApiKey {ELASTIC_ARCHIVIST_API_KEY}`
+- `Content-Type: application/json`
+- `kbn-xsrf: true`
+
+**Response**: Multi-step conversational response with:
+- Reasoning steps (agent's thought process)
+- Tool calls (`platform.core.search` on `news_archive` index)
+- Article results with highlights and references
+- Conversation ID for follow-up queries
+
+**Diagnostics**: Run `python test_archivist.py` to verify connectivity and test search functionality.
+
 ## Technology Stack
 
 - **A2A SDK**: v0.3.8 ([a2a-python](https://github.com/a2aproject/a2a-python))
 - **AI Model**: Anthropic Claude Sonnet 4
-- **Search**: Elastic Serverless
-- **Web Framework**: Starlette (via A2A SDK)
+- **Search**: Elastic Serverless (Elastic Cloud)
+- **Archivist API**: Elastic Conversational API (`/agent_builder/converse`)
+- **Web Framework**: Starlette (via A2A SDK) + Mesop (UI)
 - **Server**: Uvicorn ASGI server
+- **HTTP Client**: httpx (async)
 - **Language**: Python 3.10+
 
 ## License

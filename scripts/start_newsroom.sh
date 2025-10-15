@@ -26,6 +26,8 @@ PID_FILE=".newsroom_pids"
 
 # Agent configurations: name:port:module
 AGENTS=(
+    "Event Hub:8090:services.event_hub:app"
+    "Article API:8085:services.article_api:app"
     "News Chief:8080:agents.news_chief:app"
     "Reporter:8081:agents.reporter:app"
     "Editor:8082:agents.editor:app"
@@ -35,10 +37,17 @@ AGENTS=(
 
 # Parse command line arguments
 RELOAD_FLAG=""
-if [ "$1" == "--reload" ]; then
-    RELOAD_FLAG="--reload"
-    echo -e "${BLUE}🔄 Hot reload enabled${NC}"
-fi
+START_UI=false
+
+for arg in "$@"; do
+    if [ "$arg" == "--reload" ]; then
+        RELOAD_FLAG="--reload"
+        echo -e "${BLUE}🔄 Hot reload enabled${NC}"
+    elif [ "$arg" == "--with-ui" ]; then
+        START_UI=true
+        echo -e "${BLUE}🌐 UI will be started on port 3000${NC}"
+    fi
+done
 
 if [ "$1" == "--stop" ]; then
     echo -e "${YELLOW}🛑 Stopping all newsroom agents...${NC}"
@@ -58,9 +67,9 @@ if [ "$1" == "--stop" ]; then
         rm "$PID_FILE"
     fi
 
-    # Also kill any processes still bound to the ports
-    echo -e "${YELLOW}   Checking for processes on ports 8080-8084...${NC}"
-    for port in 8080 8081 8082 8083 8084; do
+    # Also kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
+    echo -e "${YELLOW}   Checking for processes on ports 8080-8085, 8090, 3000...${NC}"
+    for port in 8080 8081 8082 8083 8084 8085 8090 3000; do
         PID=$(lsof -ti:$port 2>/dev/null)
         if [ -n "$PID" ]; then
             echo -e "${YELLOW}   Killing process on port $port (PID: $PID)...${NC}"
@@ -79,7 +88,7 @@ mkdir -p "$LOG_DIR"
 # Check if any ports are already in use
 echo -e "${BLUE}🔍 Checking for port conflicts...${NC}"
 PORTS_IN_USE=""
-for port in 8080 8081 8082 8083 8084; do
+for port in 8080 8081 8082 8083 8084 8085 8090; do
     if lsof -ti:$port > /dev/null 2>&1; then
         PORTS_IN_USE="$PORTS_IN_USE $port"
     fi
@@ -153,6 +162,8 @@ if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✅ All agents started successfully!${NC}"
     echo ""
     echo -e "${BLUE}📊 Agent Endpoints:${NC}"
+    echo -e "${BLUE}   Event Hub:   http://localhost:8090${NC}"
+    echo -e "${BLUE}   Article API: http://localhost:8085${NC}"
     echo -e "${BLUE}   News Chief:  http://localhost:8080${NC}"
     echo -e "${BLUE}   Reporter:    http://localhost:8081${NC}"
     echo -e "${BLUE}   Editor:      http://localhost:8082${NC}"
@@ -161,11 +172,47 @@ if [ $FAILED -eq 0 ]; then
     echo ""
     echo -e "${BLUE}📁 Logs directory: $LOG_DIR/${NC}"
     echo ""
+
+    # Start UI if requested
+    if [ "$START_UI" = true ]; then
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}🌐 Starting React UI on port 3001...${NC}"
+
+        # Check if React UI exists
+        if [ ! -f "react-ui/package.json" ]; then
+            echo -e "${RED}   ❌ React UI not found in react-ui/ directory${NC}"
+        else
+            cd react-ui
+            # Start React UI in background
+            npm start > "../$LOG_DIR/UI.log" 2>&1 &
+            UI_PID=$!
+            echo "UI:$UI_PID" >> "../$PID_FILE"
+            cd ..
+
+            sleep 2
+
+            if ps -p $UI_PID > /dev/null 2>&1; then
+                echo -e "${GREEN}   ✅ React UI started (PID: $UI_PID)${NC}"
+                echo -e "${BLUE}      Logs: $LOG_DIR/UI.log${NC}"
+                echo -e "${BLUE}      URL: http://localhost:3001${NC}"
+                echo ""
+                echo -e "${BLUE}📝 React UI will open automatically at http://localhost:3001${NC}"
+            else
+                echo -e "${RED}   ❌ UI failed to start${NC}"
+                echo -e "${RED}      Check logs: $LOG_DIR/UI.log${NC}"
+            fi
+        fi
+        echo ""
+    fi
+
     echo -e "${BLUE}💡 Commands:${NC}"
     echo -e "${BLUE}   View all logs:        tail -f $LOG_DIR/*.log${NC}"
     echo -e "${BLUE}   View specific agent:  tail -f $LOG_DIR/News_Chief.log${NC}"
     echo -e "${BLUE}   Stop all agents:      ./start_newsroom.sh --stop${NC}"
     echo -e "${BLUE}   Test workflow:        python tests/test_newsroom_workflow.py${NC}"
+    if [ "$START_UI" = true ]; then
+        echo -e "${BLUE}   Open UI:              open http://localhost:3000${NC}"
+    fi
     echo ""
 else
     echo -e "${RED}⚠️  Some agents failed to start${NC}"

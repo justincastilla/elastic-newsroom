@@ -6,72 +6,81 @@ Uses Anthropic Claude for AI-powered content generation.
 """
 
 import json
-import logging
 import os
+import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
 import click
-import uvicorn
 import httpx
-from anthropic import Anthropic
-from dotenv import load_dotenv, dotenv_values
-
-# Load environment variables from .env file
-# First try load_dotenv() which loads into os.environ
-load_dotenv()
-
-# Also get values directly as a backup
-env_config = dotenv_values('.env')
-if env_config:
-    # If dotenv_values found config, ensure it's in os.environ
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
+from starlette.middleware.cors import CORSMiddleware
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
+from a2a.client import create_text_message_object
+from utils import setup_logger, load_env_config, run_agent_server
+from agents.base_agent import BaseAgent
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [REPORTER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')  # Append mode
-    ],
-    force=True  # Override any existing logging config
-)
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_env_config()
 
+# Configure logging using centralized utility
+logger = setup_logger("REPORTER")
 
-class ReporterAgent:
+# Singleton instance for maintaining state across requests
+_reporter_agent_instance = None
+
+class ReporterAgent(BaseAgent):
     """Reporter Agent - Writes news articles based on assignments"""
 
     def __init__(self, editor_url: Optional[str] = None, researcher_url: Optional[str] = None, archivist_url: Optional[str] = None, publisher_url: Optional[str] = None):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.assignments: Dict[str, Dict[str, Any]] = {}
         self.drafts: Dict[str, Dict[str, Any]] = {}
         self.editor_reviews: Dict[str, Dict[str, Any]] = {}
         self.research_data: Dict[str, Dict[str, Any]] = {}
         self.archive_data: Dict[str, Dict[str, Any]] = {}
+        self.archivist_status: Dict[str, str] = {}  # Track Archivist activity per story
+        self.waiting_status: Dict[str, str] = {}  # Track what agent is waiting for
         self.editor_url = editor_url or "http://localhost:8082"
         self.researcher_url = researcher_url or "http://localhost:8083"
         self.publisher_url = publisher_url or "http://localhost:8084"
         # Get Archivist URL from environment or parameter
         self.archivist_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")
         self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
-        self.anthropic_client = None
 
-        # Initialize Anthropic client if API key is available
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-        else:
-            logger.warning("ANTHROPIC_API_KEY not set - will use mock article generation")
+        # Parse Archivist URL once during initialization (cached for efficiency)
+        self._archivist_endpoint: Optional[str] = None
+        self._archivist_agent_id: Optional[str] = None
+        if self.archivist_url:
+            self._parse_archivist_url()
+
+        # Initialize Anthropic client using centralized utility (from BaseAgent)
+        self._init_anthropic_client()
+        if not self.anthropic_client:
+            logger.warning("Will use mock article generation")
+
+    def _parse_archivist_url(self):
+        """Parse Archivist URL once during initialization for efficiency"""
+        if "/api/agent_builder/a2a/" in self.archivist_url:
+            # Extract agent_id from URL
+            agent_id = self.archivist_url.split("/")[-1]
+            if agent_id.endswith(".json"):
+                agent_id = agent_id[:-5]
+
+            # Build converse API endpoint
+            base_url = self.archivist_url.split("/api/agent_builder/")[0]
+            self._archivist_endpoint = f"{base_url}/api/agent_builder/a2a/archive-agent"
+            self._archivist_agent_id = agent_id
+
+    # Note: Helper methods (_error_response, _success_response, _create_a2a_client,
+    # _parse_a2a_response, _strip_json_codeblocks, _call_anthropic) are now
+    # inherited from BaseAgent
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -84,31 +93,31 @@ class ReporterAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
             action = query_data.get("action")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action != "get_status":
+                logger.info(f"🎯 Action: {action}")
 
             if action == "accept_assignment":
                 return await self._accept_assignment(query_data)
             elif action == "write_article":
                 return await self._write_article(query_data)
-            elif action == "submit_draft":
-                return await self._submit_draft(query_data)
             elif action == "apply_edits":
                 return await self._apply_edits(query_data)
-            elif action == "publish_article":
-                return await self._publish_article(query_data)
             elif action == "get_status":
                 return await self._get_status(query_data)
             else:
                 return {
                     "status": "error",
                     "message": f"Unknown action: {action}",
-                    "available_actions": ["accept_assignment", "write_article", "submit_draft", "apply_edits", "publish_article", "get_status"]
+                    "available_actions": ["accept_assignment", "write_article", "apply_edits", "get_status"]
                 }
 
         except json.JSONDecodeError as e:
@@ -130,19 +139,11 @@ class ReporterAgent:
 
         # Validate assignment
         if not assignment:
-            logger.error("❌ No assignment data provided")
-            return {
-                "status": "error",
-                "message": "No assignment data provided"
-            }
+            return self._error_response("No assignment data provided")
 
         story_id = assignment.get("story_id")
         if not story_id:
-            logger.error("❌ Assignment missing story_id")
-            return {
-                "status": "error",
-                "message": "Assignment missing story_id"
-            }
+            return self._error_response("Assignment missing story_id")
 
         logger.info(f"📋 Assignment details:")
         logger.info(f"   Story ID: {story_id}")
@@ -158,16 +159,26 @@ class ReporterAgent:
             "reporter_status": "pending"
         }
 
+        # Publish event: assignment accepted
+        await self._publish_event(
+            event_type="assignment_accepted",
+            story_id=story_id,
+            data={
+                "topic": assignment.get("topic"),
+                "target_length": assignment.get("target_length"),
+                "priority": assignment.get("priority", "normal")
+            }
+        )
+
         logger.info(f"✅ Assignment accepted and stored")
         logger.info(f"   Total assignments: {len(self.assignments)}")
 
-        return {
-            "status": "success",
-            "message": f"Assignment accepted for story: {assignment.get('topic', story_id)}",
-            "story_id": story_id,
-            "estimated_completion": "30 minutes",  # Mock estimate
-            "reporter_status": "ready_to_write"
-        }
+        return self._success_response(
+            f"Assignment accepted for story: {assignment.get('topic', story_id)}",
+            story_id=story_id,
+            estimated_completion="30 minutes",
+            reporter_status="ready_to_write"
+        )
 
     async def _write_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Write an article using Anthropic Claude with Researcher support"""
@@ -175,18 +186,10 @@ class ReporterAgent:
         story_id = request.get("story_id")
 
         if not story_id:
-            logger.error("❌ No story_id provided")
-            return {
-                "status": "error",
-                "message": "No story_id provided"
-            }
+            return self._error_response("No story_id provided")
 
         if story_id not in self.assignments:
-            logger.error(f"❌ No assignment found for story_id: {story_id}")
-            return {
-                "status": "error",
-                "message": f"No assignment found for story_id: {story_id}"
-            }
+            return self._error_response(f"No assignment found for story_id: {story_id}")
 
         assignment = self.assignments[story_id]
         logger.info(f"📝 Writing article for: {assignment.get('topic')}")
@@ -202,6 +205,13 @@ class ReporterAgent:
             outline = outline_and_questions.get("outline", "")
             research_questions = outline_and_questions.get("research_questions", [])
 
+            # Publish event: outline generated
+            await self._publish_event(
+                event_type="outline_generated",
+                story_id=story_id,
+                data={"question_count": len(research_questions)}
+            )
+
             logger.info(f"✅ Outline generated")
             logger.info(f"   Research questions identified: {len(research_questions)}")
 
@@ -212,6 +222,25 @@ class ReporterAgent:
 
             if research_questions:
                 logger.info("🔍 Calling Researcher and Archivist in parallel...")
+
+                # Publish event: research requested
+                await self._publish_event(
+                    event_type="research_requested",
+                    story_id=story_id,
+                    data={"question_count": len(research_questions)}
+                )
+
+                # Publish event: archive search started
+                await self._publish_event(
+                    event_type="archive_search_started",
+                    story_id=story_id,
+                    data={"topic": assignment.get("topic")}
+                )
+
+                # Set waiting status and Archivist status to active
+                self.waiting_status[story_id] = "researcher_archivist"
+                self.archivist_status[story_id] = "active"
+                logger.info(f"🟡 Reporter waiting for Researcher and Archivist (story: {story_id})")
 
                 # Create tasks for parallel execution
                 researcher_task = self._send_to_researcher(story_id, assignment, research_questions)
@@ -234,20 +263,46 @@ class ReporterAgent:
                 else:
                     logger.warning(f"⚠️  Research request failed: {research_response.get('message')}")
 
-                # Process Archivist response
+                # Process Archivist response - REQUIRED, stop workflow if it fails
                 if isinstance(archive_response, Exception):
-                    logger.error(f"❌ Archivist failed: {archive_response}")
+                    logger.error(f"❌ CRITICAL: Archivist failed - this is a REQUIRED component")
+                    logger.error(f"   Error: {archive_response}")
+                    self.archivist_status[story_id] = "error"
+                    raise Exception(f"Archivist failed - this is a REQUIRED component: {archive_response}")
                 elif archive_response.get("status") == "success":
                     archive_results = archive_response.get("articles", [])
                     self.archive_data[story_id] = archive_results
                     logger.info(f"✅ Received archive data: {len(archive_results)} historical articles")
+                    self.archivist_status[story_id] = "completed"
+
+                    # Publish event: archive search completed
+                    await self._publish_event(
+                        event_type="archive_search_completed",
+                        story_id=story_id,
+                        data={"articles_found": len(archive_results)}
+                    )
+                elif archive_response.get("status") in ["timeout", "error"]:
+                    error_msg = f"Archivist {archive_response.get('status')}: {archive_response.get('error', 'Unknown error')}"
+                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    self.archivist_status[story_id] = "error"
+                    raise Exception(f"Archivist {archive_response.get('status')} - this is a REQUIRED component: {archive_response.get('error', 'Unknown error')}")
+                elif archive_response.get("status") == "skipped":
+                    logger.error(f"❌ CRITICAL: Archivist skipped - this is a REQUIRED component")
+                    logger.error(f"   Message: {archive_response.get('message')}")
+                    self.archivist_status[story_id] = "error"
+                    raise Exception(f"Archivist skipped - this is a REQUIRED component: {archive_response.get('message')}")
                 else:
-                    logger.warning(f"⚠️  Archive request failed: {archive_response.get('message')}")
+                    error_msg = f"Archivist returned unexpected status: {archive_response.get('status')}"
+                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    self.archivist_status[story_id] = "error"
+                    raise Exception(f"Archivist returned unexpected status: {archive_response.get('status')} - this is a REQUIRED component")
             else:
                 logger.info("ℹ️  No research questions needed for this article")
 
-            # Update status to writing
+            # Clear waiting status and update to writing
+            self.waiting_status[story_id] = "none"
             self.assignments[story_id]["reporter_status"] = "writing"
+            logger.info(f"🟢 Reporter finished waiting, now writing (story: {story_id})")
 
             # Generate article with research and archive data
             logger.info("🤖 Calling Anthropic API to generate article...")
@@ -269,13 +324,58 @@ class ReporterAgent:
             self.assignments[story_id]["reporter_status"] = "draft_complete"
             self.assignments[story_id]["completed_at"] = datetime.now().isoformat()
 
+            # Extract headline for event
+            lines = article_content.strip().split('\n')
+            headline = next((line.strip() for line in lines if line.strip() and not line.strip().startswith('#')), "Untitled Article")
+            # Strip "HEADLINE:" prefix if present
+            if headline.startswith("HEADLINE:"):
+                headline = headline[len("HEADLINE:"):].strip()
+
+            # Publish event: article drafted
+            await self._publish_event(
+                event_type="article_drafted",
+                story_id=story_id,
+                data={
+                    "word_count": draft['word_count'],
+                    "target_length": assignment.get('target_length', 1000),
+                    "headline": headline[:100]  # Truncate long headlines
+                }
+            )
+
             logger.info(f"✅ Draft stored successfully")
             logger.info(f"   Word count: {draft['word_count']}")
             logger.info(f"   Total drafts: {len(self.drafts)}")
 
+            # Submit draft to News Chief for workflow management
+            logger.info("📤 Submitting draft to News Chief for workflow management...")
+            news_chief_response = await self._submit_draft_to_news_chief(story_id, draft)
+
+            if news_chief_response.get("status") == "success":
+                logger.info(f"✅ Draft submitted to News Chief successfully")
+                logger.info(f"   News Chief will handle editorial workflow")
+
+                # Extract headline from article content
+                lines = article_content.strip().split('\n')
+                headline = next((line.strip() for line in lines if line.strip() and not line.strip().startswith('#')), "Untitled Article")
+                # Strip "HEADLINE:" prefix if present
+                if headline.startswith("HEADLINE:"):
+                    headline = headline[len("HEADLINE:"):].strip()
+
+                return {
+                    "status": "success",
+                    "message": "Article draft completed and submitted to News Chief",
+                    "story_id": story_id,
+                    "word_count": draft["word_count"],
+                    "preview": article_content[:200] + "..." if len(article_content) > 200 else article_content,
+                    "news_chief_response": news_chief_response
+                }
+            else:
+                logger.warning(f"⚠️  Failed to submit to News Chief: {news_chief_response.get('message')}")
+
+            # Fallback: return draft completion if News Chief submission failed
             return {
                 "status": "success",
-                "message": "Article draft completed",
+                "message": "Article draft completed (News Chief submission failed)",
                 "story_id": story_id,
                 "word_count": draft["word_count"],
                 "preview": article_content[:200] + "..." if len(article_content) > 200 else article_content
@@ -317,48 +417,27 @@ Provide your response in JSON format:
 
 Limit to 3-5 focused research questions. Provide only the JSON, no additional text."""
 
-        if self.anthropic_client:
+        default_response = {
+            "outline": "Introduction, Background, Current State, Future Outlook",
+            "research_questions": []
+        }
+
+        response_text = await self._call_anthropic(prompt, max_tokens=1500, fallback=lambda: None)
+        if response_text:
             try:
-                message = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=1500,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-
-                response_text = message.content[0].text
-                if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0].strip()
-
+                response_text = self._strip_json_codeblocks(response_text)
                 return json.loads(response_text)
             except Exception as e:
-                logger.error(f"Error generating outline: {e}", exc_info=True)
-                return {
-                    "outline": "Introduction, Background, Current State, Future Outlook",
-                    "research_questions": []
-                }
-        else:
-            return {
-                "outline": "Introduction, Background, Current State, Future Outlook",
-                "research_questions": []
-            }
+                logger.error(f"Error parsing outline JSON: {e}", exc_info=True)
+                return default_response
+        return default_response
 
     async def _send_to_researcher(self, story_id: str, assignment: Dict[str, Any], questions: List[str]) -> Dict[str, Any]:
         """Send research questions to Researcher agent via A2A"""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as http_client:
-                # Discover Researcher agent
-                logger.info(f"🔍 Discovering Researcher agent at {self.researcher_url}")
-                card_resolver = A2ACardResolver(http_client, self.researcher_url)
-                researcher_card = await card_resolver.get_agent_card()
-                logger.info(f"✅ Found Researcher: {researcher_card.name} (v{researcher_card.version})")
-
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                researcher_client = client_factory.create(researcher_card)
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using helper
+                researcher_client, _ = await self._create_a2a_client(http_client, self.researcher_url, "Researcher")
 
                 # Send research_questions task to Researcher
                 request = {
@@ -373,250 +452,191 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
 
                 message = create_text_message_object(content=json.dumps(request))
 
-                # Get response
+                # Get response using helper
                 logger.info(f"⏳ Waiting for Researcher response...")
-                async for response in researcher_client.send_message(message):
-                    if hasattr(response, 'parts'):
-                        part = response.parts[0]
-                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-                        if text_content:
-                            result = json.loads(text_content)
-                            logger.info(f"📬 Received A2A response from Researcher:")
-                            logger.info(f"   Status: {result.get('status')}")
-                            logger.info(f"   Research ID: {result.get('research_id')}")
-                            logger.info(f"   Questions answered: {result.get('total_questions')}")
-                            return result
+                result = await self._parse_a2a_response(researcher_client, message)
+
+                if result:
+                    logger.info(f"📬 Received A2A response from Researcher:")
+                    logger.info(f"   Status: {result.get('status')}")
+                    logger.info(f"   Research ID: {result.get('research_id')}")
+                    logger.info(f"   Questions answered: {result.get('total_questions')}")
+                    return result
 
                 logger.warning("⚠️  No response from Researcher")
                 return {"status": "error", "message": "No response from Researcher"}
 
         except Exception as e:
             logger.error(f"Failed to send research request to Researcher: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to contact Researcher: {str(e)}"
-            }
+            return self._error_response(f"Failed to contact Researcher: {str(e)}")
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for historical articles via Archivist agent (Elastic cloud)"""
-        try:
-            # Check if Archivist URL is configured
-            if not self.archivist_url:
-                logger.warning("⚠️  ELASTIC_ARCHIVIST_AGENT_CARD_URL not set - skipping archive search")
-                return {
-                    "status": "skipped",
-                    "message": "Archivist agent card URL not configured"
+        """Search for historical articles via Archivist agent using A2A JSONRPC protocol with retry logic"""
+        # Check if Archivist URL is configured
+        if not self.archivist_url or not self._archivist_endpoint or not self._archivist_agent_id:
+            logger.error("❌ ELASTIC_ARCHIVIST_AGENT_CARD_URL not set or invalid - Archivist is REQUIRED")
+            raise Exception("Archivist agent card URL not configured or invalid - Archivist is REQUIRED for workflow")
+
+        # Build search query from topic and angle
+        topic = assignment.get("topic", "")
+        angle = assignment.get("angle", "")
+        search_query = f"Find articles about {topic} {angle}".strip()
+
+        logger.info(f"🔍 Connecting to Archivist agent via A2A JSONRPC protocol")
+        logger.info(f"   Search query: '{search_query}'")
+        logger.info(f"   A2A endpoint: {self._archivist_endpoint}")
+        logger.info(f"   Agent ID: {self._archivist_agent_id}")
+
+        # Create headers with API key (per A2A docs: requires kbn-xsrf header)
+        headers = {
+            "Content-Type": "application/json",
+            "kbn-xsrf": "kibana"
+        }
+
+        if self.archivist_api_key:
+            headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
+            logger.info(f"🔑 Using API key authentication")
+        else:
+            logger.error("❌ ELASTIC_ARCHIVIST_API_KEY not set - Archivist is REQUIRED")
+            raise Exception("Archivist API key not configured - Archivist is REQUIRED for workflow")
+
+        # Generate unique message ID using timestamp and story_id
+        timestamp_ms = int(time.time() * 1000)
+        message_id = f"msg-{timestamp_ms}-{story_id.replace('_', '')[:8]}"
+
+        # Build A2A JSONRPC request (per A2A protocol spec)
+        a2a_request = {
+            "id": message_id,
+            "jsonrpc": "2.0",
+            "method": "message/send",
+            "params": {
+                "configuration": {
+                    "acceptedOutputModes": [
+                        "text/plain",
+                        "video/mp4"
+                    ]
+                },
+                "message": {
+                    "kind": "message",
+                    "messageId": message_id,
+                    "metadata": {},
+                    "parts": [
+                        {
+                            "kind": "text",
+                            "text": search_query
+                        }
+                    ],
+                    "role": "user"
                 }
+            }
+        }
 
-            # Build search query from topic and angle
-            topic = assignment.get("topic", "")
-            angle = assignment.get("angle", "")
-            search_query = f"{topic} {angle}".strip()
+        logger.info(f"📨 Sending A2A JSONRPC request:")
+        logger.info(f"   Story ID: {story_id}")
+        logger.info(f"   Message ID: {message_id}")
+        logger.info(f"   Search query: {search_query}")
 
-            logger.info(f"🔍 Discovering Archivist agent at {self.archivist_url}")
+        # Retry logic: up to 3 attempts with 60-second timeout each
+        max_attempts = 3
+        timeout_seconds = 60
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"🔄 Archivist attempt {attempt}/{max_attempts} (timeout: {timeout_seconds}s)")
+                start_time = time.time()
 
-            # Create headers with API key if available
-            headers = {}
-            if self.archivist_api_key:
-                # Elastic Cloud uses ApiKey auth format, not Bearer
-                headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
-                logger.info(f"🔑 Using API key authentication for Archivist")
-            else:
-                logger.warning("⚠️  ELASTIC_ARCHIVIST_API_KEY not set - request may fail")
+                async with httpx.AsyncClient(timeout=timeout_seconds) as http_client:
+                    logger.info(f"⏳ Waiting for Archivist A2A response...")
 
-            async with httpx.AsyncClient(timeout=60.0, headers=headers) as http_client:
-                # Fetch Archivist agent card directly (URL already points to agent card)
-                logger.info(f"📥 Fetching agent card from: {self.archivist_url}")
-                card_response = await http_client.get(self.archivist_url)
-                card_response.raise_for_status()
-                card_data = card_response.json()
-                archivist_card = AgentCard(**card_data)
-                logger.info(f"✅ Found Archivist: {archivist_card.name} (v{archivist_card.version})")
+                    response = await http_client.post(
+                        self._archivist_endpoint,
+                        json=a2a_request,
+                        headers=headers
+                    )
 
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client for Archivist...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                archivist_client = client_factory.create(archivist_card)
+                    elapsed = time.time() - start_time
+                    logger.info(f"📥 Received response in {elapsed:.1f} seconds")
+                    logger.info(f"   Status Code: {response.status_code}")
 
-                # Send search query to Archivist (using platform.core.search skill)
-                # The Archivist accepts text/plain input for searches
-                message = create_text_message_object(content=search_query)
+                    response.raise_for_status()
+                    result = response.json()
 
-                logger.info(f"📨 Sending A2A message to Archivist:")
-                logger.info(f"   Story ID: {story_id}")
-                logger.info(f"   Search Query: {search_query}")
-
-                # Get response
-                logger.info(f"⏳ Waiting for Archivist response...")
-                response_count = 0
-                async for response in archivist_client.send_message(message):
-                    response_count += 1
-                    logger.info(f"📥 Received response chunk #{response_count} from Archivist")
-                    logger.info(f"   Response type: {type(response)}")
-                    logger.info(f"   Has parts: {hasattr(response, 'parts')}")
-
-                    if hasattr(response, 'parts'):
-                        logger.info(f"   Number of parts: {len(response.parts)}")
-                        if len(response.parts) > 0:
-                            part = response.parts[0]
-                            logger.info(f"   Part type: {type(part)}")
-                            logger.info(f"   Part has root: {hasattr(part, 'root')}")
-
-                            text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-                            logger.info(f"   Text content: {text_content[:200] if text_content else 'None'}")
-
-                            if text_content:
-                                # Parse the response - it may be text or JSON
-                                try:
-                                    result = json.loads(text_content)
-                                except json.JSONDecodeError:
-                                    # If not JSON, treat as text summary
-                                    result = {"summary": text_content, "articles": []}
-
-                                logger.info(f"📬 Received A2A response from Archivist")
-                                logger.info(f"   Response length: {len(text_content)} chars")
-
-                                return {
-                                    "status": "success",
-                                    "query": search_query,
-                                    "response": text_content,
-                                    "articles": result.get("articles", []) if isinstance(result, dict) else []
-                                }
+                    # Check if response is empty
+                    response_text = response.text.strip()
+                    if not response_text or response_text == '""' or response_text == "":
+                        if attempt < max_attempts:
+                            logger.warning(f"⚠️  Archivist returned empty response on attempt {attempt} - retrying...")
+                            continue
                         else:
-                            logger.warning("⚠️  Response has parts but parts list is empty")
-                    else:
-                        logger.warning("⚠️  Response does not have parts attribute")
+                            logger.error(f"❌ Archivist returned empty response after {max_attempts} attempts - REQUIRED component failed")
+                            raise Exception(f"Archivist returned empty response after {max_attempts} attempts - Archivist is REQUIRED")
 
-                logger.warning(f"⚠️  No response content from Archivist (received {response_count} chunks)")
-                return {"status": "error", "message": "No response from Archivist"}
+                    # Extract text response from A2A JSONRPC response
+                    # Response structure: {"jsonrpc": "2.0", "id": "msg-...", "result": {...}}
+                    if "error" in result:
+                        error_msg = result.get("error", {}).get("message", "Unknown error")
+                        logger.error(f"❌ Archivist returned A2A error: {error_msg}")
+                        if attempt < max_attempts:
+                            logger.info(f"🔄 Retrying after A2A error...")
+                            continue
+                        else:
+                            raise Exception(f"Archivist A2A error after {max_attempts} attempts: {error_msg}")
 
-        except Exception as e:
-            logger.error(f"Failed to send archive request to Archivist: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to contact Archivist: {str(e)}"
-            }
+                    a2a_result = result.get("result", {})
 
-    async def _send_to_publisher(self, story_id: str) -> Dict[str, Any]:
-        """Send finalized article to Publisher agent via A2A"""
-        try:
-            # Get draft and all related data
-            if story_id not in self.drafts:
-                return {
-                    "status": "error",
-                    "message": f"No draft found for story_id: {story_id}"
-                }
+                    # Extract the message parts from A2A response
+                    full_response = ""
+                    articles = []
 
-            draft = self.drafts[story_id]
-            assignment = self.assignments.get(story_id, {})
-            review = self.editor_reviews.get(story_id, {})
-            research = self.research_data.get(story_id, [])
-            archive = self.archive_data.get(story_id, {})
+                    message = a2a_result.get("message", {})
+                    parts = message.get("parts", [])
 
-            # Build complete article data for Publisher
-            article_data = {
-                "story_id": story_id,
-                "headline": self._extract_headline(draft.get("content", "")),
-                "content": draft.get("content"),
-                "topic": assignment.get("topic"),
-                "angle": assignment.get("angle"),
-                "word_count": draft.get("word_count"),
-                "target_length": assignment.get("target_length"),
-                "priority": assignment.get("priority", "normal"),
-                "published_at": datetime.now().isoformat(),
-                "created_at": assignment.get("accepted_at"),
-                "deadline": assignment.get("deadline"),
-                "author": "Reporter Agent",
-                "editor": "Editor Agent",
-                "research_questions": [r.get("question") for r in research] if research else [],
-                "research_data": research,
-                "editorial_review": review,
-                "archive_references": str(archive) if archive else None,
-                "url_slug": draft.get("url_slug") or self._generate_url_slug(assignment.get("topic", story_id)),
-                "filepath": draft.get("filepath"),
-                "version": 1,
-                "revisions_count": draft.get("revisions_applied", 0),
-                "agents_involved": ["News Chief", "Reporter", "Researcher", "Archivist", "Editor", "Publisher"],
-                "metadata": {
-                    "workflow_start": assignment.get("accepted_at"),
-                    "draft_completed": draft.get("created_at"),
-                    "reviewed_at": review.get("reviewed_at") if review else None,
-                    "revised_at": draft.get("revised_at")
-                }
-            }
+                    for part in parts:
+                        if part.get("kind") == "text":
+                            text_content = part.get("text", "")
+                            if text_content:
+                                full_response += text_content + "\n\n"
 
-            logger.info(f"🔍 Discovering Publisher agent at {self.publisher_url}")
+                    # Log the results
+                    logger.info(f"")
+                    logger.info(f"📚 ARCHIVIST A2A SEARCH RESULTS (Attempt {attempt}):")
+                    logger.info(f"   🔍 Search Query: {search_query}")
+                    logger.info(f"   📨 Message ID: {message_id}")
+                    logger.info(f"   📝 Response length: {len(full_response)} characters")
+                    logger.info(f"   Preview: {full_response[:200]}...")
+                    logger.info(f"")
 
-            async with httpx.AsyncClient(timeout=90.0) as http_client:
-                # Discover Publisher agent
-                card_resolver = A2ACardResolver(http_client, self.publisher_url)
-                publisher_card = await card_resolver.get_agent_card()
-                logger.info(f"✅ Found Publisher: {publisher_card.name} (v{publisher_card.version})")
+                    # Success! Return the result
+                    logger.info(f"✅ Archivist succeeded on attempt {attempt}")
+                    return {
+                        "status": "success",
+                        "query": search_query,
+                        "response": full_response.strip(),
+                        "message_id": message_id,
+                        "articles": []  # A2A format may not return structured articles
+                    }
 
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client for Publisher...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                publisher_client = client_factory.create(publisher_card)
+            except httpx.TimeoutException as e:
+                elapsed = time.time() - start_time if 'start_time' in locals() else 0
+                logger.warning(f"⚠️  Archivist attempt {attempt} timed out after {elapsed:.1f} seconds: {e}")
+                
+                if attempt < max_attempts:
+                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
+                    continue
+                else:
+                    logger.error(f"❌ Archivist timed out after {max_attempts} attempts - REQUIRED component failed")
+                    raise Exception(f"Archivist timed out after {max_attempts} attempts - Archivist is REQUIRED")
 
-                # Send publish request
-                request = {
-                    "action": "publish_article",
-                    "article": article_data
-                }
-
-                logger.info(f"📨 Sending A2A message to Publisher:")
-                logger.info(f"   Story ID: {story_id}")
-                logger.info(f"   Headline: {article_data['headline'][:60]}...")
-
-                message = create_text_message_object(content=json.dumps(request))
-
-                # Get response
-                logger.info(f"⏳ Waiting for Publisher response...")
-                async for response in publisher_client.send_message(message):
-                    if hasattr(response, 'parts'):
-                        part = response.parts[0]
-                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-                        if text_content:
-                            result = json.loads(text_content)
-                            logger.info(f"📬 Received A2A response from Publisher:")
-                            logger.info(f"   Status: {result.get('status')}")
-                            if result.get("status") == "success":
-                                logger.info(f"   Published to: {result.get('elasticsearch', {}).get('index')}")
-                                logger.info(f"   Tags: {result.get('tags')}")
-                                logger.info(f"   Categories: {result.get('categories')}")
-                            return result
-
-                logger.warning("⚠️  No response from Publisher")
-                return {"status": "error", "message": "No response from Publisher"}
-
-        except Exception as e:
-            logger.error(f"Failed to send to Publisher: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to contact Publisher: {str(e)}"
-            }
-
-    def _extract_headline(self, content: str) -> str:
-        """Extract headline from article content"""
-        lines = content.split("\n")
-        for line in lines:
-            if line.strip().startswith("HEADLINE:"):
-                return line.replace("HEADLINE:", "").strip()
-            elif line.strip() and not line.strip().startswith("#"):
-                # First non-empty, non-markdown-header line
-                return line.strip()
-        return "Untitled Article"
-
-    def _generate_url_slug(self, topic: str) -> str:
-        """Generate URL-friendly slug from topic"""
-        import re
-        slug = topic.lower()
-        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
-        slug = re.sub(r'\s+', '-', slug)
-        slug = re.sub(r'-+', '-', slug)
-        return slug.strip('-')[:50]  # Limit to 50 chars
+            except Exception as e:
+                elapsed = time.time() - start_time if 'start_time' in locals() else 0
+                logger.warning(f"⚠️  Archivist attempt {attempt} failed after {elapsed:.1f} seconds: {e}")
+                
+                if attempt < max_attempts:
+                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
+                    continue
+                else:
+                    logger.error(f"❌ Archivist failed after {max_attempts} attempts - REQUIRED component failed")
+                    raise Exception(f"Archivist failed after {max_attempts} attempts: {str(e)} - Archivist is REQUIRED")
 
     async def _generate_article(self, assignment: Dict[str, Any], outline: str = "", research_results: Optional[List[Dict[str, Any]]] = None, archive_results: Optional[List[Dict[str, Any]]] = None) -> str:
         """Generate article content using Anthropic Claude with research data"""
@@ -692,23 +712,10 @@ HEADLINE: [Your headline here]
 
 [Article body paragraphs]"""
 
-        # Use Anthropic if available, otherwise mock
-        if self.anthropic_client:
-            try:
-                message = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=2000,
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
-                )
-                return message.content[0].text
-            except Exception as e:
-                logger.error(f"Anthropic API error: {e}", exc_info=True)
-                return self._generate_mock_article(topic, angle, target_length)
-        else:
-            return self._generate_mock_article(topic, angle, target_length)
+        # Use Anthropic helper with fallback to mock
+        fallback = lambda: self._generate_mock_article(topic, angle, target_length)
+        result = await self._call_anthropic(prompt, max_tokens=2000, fallback=fallback)
+        return result if result else fallback()
 
     def _generate_mock_article(self, topic: str, angle: str, target_length: int) -> str:
         """Generate a simple mock article when Anthropic API is not available"""
@@ -725,140 +732,60 @@ Further updates will be provided as more information becomes available. Stakehol
 [Article generated with mock content - ANTHROPIC_API_KEY not configured]
 [Target length: {target_length} words]"""
 
-    async def _submit_draft(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit completed draft to Editor via A2A"""
-        logger.info("📤 Submitting draft to Editor...")
-        story_id = request.get("story_id")
-
-        if not story_id:
-            logger.error("❌ No story_id provided")
-            return {
-                "status": "error",
-                "message": "No story_id provided"
-            }
-
-        if story_id not in self.drafts:
-            logger.error(f"❌ No draft found for story_id: {story_id}")
-            return {
-                "status": "error",
-                "message": f"No draft found for story_id: {story_id}"
-            }
-
-        draft = self.drafts[story_id]
-
-        # Mark as submitted
-        draft["status"] = "submitted"
-        draft["submitted_at"] = datetime.now().isoformat()
-        draft["submitted_to"] = "editor"
-
-        # Update assignment status
-        if story_id in self.assignments:
-            self.assignments[story_id]["reporter_status"] = "submitted"
-
-        logger.info(f"📨 Sending draft to Editor via A2A...")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Word count: {draft['word_count']}")
-
-        # Send draft to Editor via A2A
-        editor_response = await self._send_to_editor(draft)
-
-        logger.info(f"✅ Draft submitted. Editor status: {editor_response.get('status')}")
-
-        return {
-            "status": "success",
-            "message": "Draft submitted for editorial review",
-            "story_id": story_id,
-            "submitted_to": "editor",
-            "word_count": draft["word_count"],
-            "submitted_at": draft["submitted_at"],
-            "editor_response": editor_response
-        }
-
-    async def _send_to_editor(self, draft: Dict[str, Any]) -> Dict[str, Any]:
-        """Send draft to Editor agent via A2A"""
+    async def _submit_draft_to_news_chief(self, story_id: str, draft: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit draft to News Chief for workflow management"""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as http_client:
-                # Discover Editor agent
-                logger.info(f"🔍 Discovering Editor agent at {self.editor_url}")
-                card_resolver = A2ACardResolver(http_client, self.editor_url)
-                editor_card = await card_resolver.get_agent_card()
-                logger.info(f"✅ Found Editor: {editor_card.name} (v{editor_card.version})")
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using helper
+                news_chief_url = "http://localhost:8080"
+                news_chief_client, _ = await self._create_a2a_client(http_client, news_chief_url, "News Chief")
 
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                editor_client = client_factory.create(editor_card)
-
-                # Send review_draft task to Editor
-                request = {
-                    "action": "review_draft",
+                # Send draft submission request
+                submit_request = {
+                    "action": "submit_draft",
+                    "story_id": story_id,
                     "draft": draft
                 }
-                logger.info(f"📨 Sending A2A message to Editor:")
-                logger.info(f"   Action: {request['action']}")
-                logger.info(f"   Story ID: {draft.get('story_id')}")
+                logger.info(f"📨 Sending draft submission to News Chief:")
+                logger.info(f"   Story ID: {story_id}")
+                logger.info(f"   Word Count: {draft.get('word_count')}")
+                logger.info(f"   Reporter assignments: {list(self.assignments.keys())}")
 
-                message = create_text_message_object(content=json.dumps(request))
+                message = create_text_message_object(content=json.dumps(submit_request))
 
-                # Get response
-                logger.info(f"⏳ Waiting for Editor response...")
-                async for response in editor_client.send_message(message):
-                    if hasattr(response, 'parts'):
-                        part = response.parts[0]
-                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
-                        if text_content:
-                            result = json.loads(text_content)
-                            logger.info(f"📬 Received A2A response from Editor:")
-                            logger.info(f"   Status: {result.get('status')}")
-                            logger.info(f"   Review ID: {result.get('review_id')}")
+                # Get response using helper
+                logger.info(f"⏳ Waiting for News Chief response...")
+                result = await self._parse_a2a_response(news_chief_client, message)
 
-                            # Store the review
-                            story_id = draft.get('story_id')
-                            if story_id and result.get('status') == 'success':
-                                self.editor_reviews[story_id] = result.get('review', {})
-                                logger.info(f"   Approval status: {self.editor_reviews[story_id].get('approval_status')}")
+                if result:
+                    logger.info(f"📬 Received response from News Chief:")
+                    logger.info(f"   Status: {result.get('status')}")
+                    logger.info(f"   Message: {result.get('message')}")
+                    return result
 
-                            return result
-
-                logger.warning("⚠️  No response from Editor")
-                return {"status": "error", "message": "No response from Editor"}
+                return self._error_response("No response from News Chief")
 
         except Exception as e:
-            logger.error(f"Failed to send draft to Editor: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to contact Editor: {str(e)}"
-            }
+            logger.error(f"Failed to submit draft to News Chief: {e}", exc_info=True)
+            return self._error_response(f"Failed to contact News Chief: {str(e)}")
 
     async def _apply_edits(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Apply editorial suggestions to a draft using Anthropic"""
         logger.info("✏️  Applying editorial suggestions...")
         story_id = request.get("story_id")
+        editor_review = request.get("editor_review", {})
 
         if not story_id:
-            logger.error("❌ No story_id provided")
-            return {
-                "status": "error",
-                "message": "No story_id provided"
-            }
+            return self._error_response("No story_id provided")
 
         if story_id not in self.drafts:
-            logger.error(f"❌ No draft found for story_id: {story_id}")
-            return {
-                "status": "error",
-                "message": f"No draft found for story_id: {story_id}"
-            }
+            return self._error_response(f"No draft found for story_id: {story_id}")
 
-        if story_id not in self.editor_reviews:
-            logger.error(f"❌ No editor review found for story_id: {story_id}")
-            return {
-                "status": "error",
-                "message": f"No editor review found for story_id: {story_id}. Submit draft for review first."
-            }
+        if not editor_review:
+            return self._error_response(f"No editor review provided for story_id: {story_id}")
 
         draft = self.drafts[story_id]
-        review = self.editor_reviews[story_id]
+        review = editor_review
 
         logger.info(f"📝 Applying edits for: {draft.get('assignment', {}).get('topic')}")
         logger.info(f"   Approval status: {review.get('approval_status')}")
@@ -882,12 +809,24 @@ Further updates will be provided as more information becomes available. Stakehol
             if story_id in self.assignments:
                 self.assignments[story_id]["reporter_status"] = "revised"
 
+            # Publish event: edits applied
+            await self._publish_event(
+                event_type="edits_applied",
+                story_id=story_id,
+                data={
+                    "old_word_count": old_word_count,
+                    "new_word_count": draft["word_count"],
+                    "revisions_applied": draft["revisions_applied"],
+                    "approval_status": review.get("approval_status")
+                }
+            )
+
             logger.info(f"✅ Draft updated successfully")
             logger.info(f"   Word count: {old_word_count} → {draft['word_count']}")
 
-            # Automatically send to Publisher after edits are applied
-            logger.info("📤 Automatically sending to Publisher...")
-            publisher_response = await self._send_to_publisher(story_id)
+            # Submit revised draft back to News Chief for workflow management
+            logger.info("📤 Submitting revised draft to News Chief...")
+            news_chief_response = await self._submit_draft_to_news_chief(story_id, draft)
 
             response = {
                 "status": "success",
@@ -899,23 +838,19 @@ Further updates will be provided as more information becomes available. Stakehol
                 "preview": revised_content[:200] + "..." if len(revised_content) > 200 else revised_content
             }
 
-            # Include publisher response if successful
-            if publisher_response.get("status") == "success":
-                response["publisher_response"] = publisher_response
-                logger.info(f"✅ Article published successfully")
+            # Include News Chief response
+            if news_chief_response.get("status") == "success":
+                response["news_chief_response"] = news_chief_response
+                logger.info(f"✅ Revised draft submitted to News Chief successfully")
             else:
-                response["publisher_error"] = publisher_response.get("message")
-                logger.warning(f"⚠️  Publisher failed: {publisher_response.get('message')}")
+                response["news_chief_error"] = news_chief_response.get("message")
+                logger.warning(f"⚠️  News Chief submission failed: {news_chief_response.get('message')}")
 
             return response
 
         except Exception as e:
             logger.error(f"❌ Error applying edits: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to apply edits: {str(e)}",
-                "story_id": story_id
-            }
+            return self._error_response(f"Failed to apply edits: {str(e)}", story_id=story_id)
 
     async def _integrate_edits(self, original_content: str, review: Dict[str, Any]) -> str:
         """Integrate editorial suggestions into the article using Anthropic"""
@@ -946,24 +881,10 @@ Please revise the article by applying ALL the suggested edits. Make sure to:
 
 Provide ONLY the revised article text, maintaining the same format (headline followed by body). Do not include any explanations or notes."""
 
-        # Use Anthropic if available
-        if self.anthropic_client:
-            try:
-                message = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=3000,
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
-                )
-                return message.content[0].text
-            except Exception as e:
-                logger.error(f"Anthropic API error during edit integration: {e}", exc_info=True)
-                # Fall back to simple replacement if API fails
-                return self._apply_simple_edits(original_content, suggested_edits)
-        else:
-            return self._apply_simple_edits(original_content, suggested_edits)
+        # Use Anthropic helper with fallback to simple edits
+        fallback = lambda: self._apply_simple_edits(original_content, suggested_edits)
+        result = await self._call_anthropic(prompt, max_tokens=3000, fallback=fallback)
+        return result if result else fallback()
 
     def _apply_simple_edits(self, content: str, suggested_edits: List[Dict[str, Any]]) -> str:
         """Apply simple text replacements when Anthropic is not available"""
@@ -974,103 +895,6 @@ Provide ONLY the revised article text, maintaining the same format (headline fol
             if original and suggested and original in revised:
                 revised = revised.replace(original, suggested)
         return revised
-
-    async def _publish_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Publish the final article to markdown file"""
-        logger.info("📰 Publishing article...")
-        story_id = request.get("story_id")
-
-        if not story_id:
-            logger.error("❌ No story_id provided")
-            return {
-                "status": "error",
-                "message": "No story_id provided"
-            }
-
-        if story_id not in self.drafts:
-            logger.error(f"❌ No draft found for story_id: {story_id}")
-            return {
-                "status": "error",
-                "message": f"No draft found for story_id: {story_id}"
-            }
-
-        draft = self.drafts[story_id]
-        assignment = draft.get("assignment", {})
-        content = draft.get("content", "")
-
-        # Create articles directory if it doesn't exist
-        articles_dir = "articles"
-        os.makedirs(articles_dir, exist_ok=True)
-
-        # Generate filename from topic and story_id
-        topic = assignment.get("topic", "article")
-        # Clean topic for filename
-        filename = topic.lower().replace(" ", "-").replace(":", "").replace(",", "")
-        filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_'))
-        filepath = os.path.join(articles_dir, f"{filename}-{story_id}.md")
-
-        # Build markdown content with metadata
-        markdown_content = f"""---
-title: {assignment.get('topic', 'Untitled')}
-story_id: {story_id}
-author: Elastic News Reporter Agent
-date: {datetime.now().strftime('%Y-%m-%d')}
-word_count: {draft.get('word_count')}
-status: {draft.get('status')}
-priority: {assignment.get('priority', 'normal')}
-target_length: {assignment.get('target_length')}
----
-
-{content}
-
----
-
-**Article Metadata:**
-- Story ID: {story_id}
-- Created: {assignment.get('created_at', 'N/A')}
-- Published: {datetime.now().isoformat()}
-- Word Count: {draft.get('word_count')}
-- Revisions Applied: {draft.get('revisions_applied', 0)}
-- Angle: {assignment.get('angle', 'N/A')}
-
-*Generated by Elastic News - A Multi-Agent AI Newsroom*
-*Powered by Anthropic Claude Sonnet 4 and A2A Protocol*
-"""
-
-        # Write to file
-        try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(markdown_content)
-
-            logger.info(f"✅ Article published successfully")
-            logger.info(f"   File: {filepath}")
-            logger.info(f"   Word count: {draft.get('word_count')}")
-
-            # Update draft status
-            draft["status"] = "published"
-            draft["published_at"] = datetime.now().isoformat()
-            draft["published_path"] = filepath
-
-            # Update assignment status
-            if story_id in self.assignments:
-                self.assignments[story_id]["reporter_status"] = "published"
-
-            return {
-                "status": "success",
-                "message": "Article published successfully",
-                "story_id": story_id,
-                "filepath": filepath,
-                "word_count": draft.get("word_count"),
-                "published_at": draft["published_at"]
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Error publishing article: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to publish article: {str(e)}",
-                "story_id": story_id
-            }
 
     async def _get_status(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Get current status of all assignments"""
@@ -1093,7 +917,9 @@ target_length: {assignment.get('target_length')}
                 "story_id": story_id,
                 "assignment": assignment,
                 "draft": draft_info if draft_info else None,
-                "editor_review": review_info if review_info else None
+                "editor_review": review_info if review_info else None,
+                "archivist_status": self.archivist_status.get(story_id, "idle"),
+            "waiting_status": self.waiting_status.get(story_id, "none")
             }
         else:
             # Return all assignments
@@ -1104,15 +930,26 @@ target_length: {assignment.get('target_length')}
                 "total_reviews": len(self.editor_reviews),
                 "assignments": list(self.assignments.values()),
                 "drafts": list(self.drafts.values()),
-                "reviews": list(self.editor_reviews.values())
+                "reviews": list(self.editor_reviews.values()),
+                "waiting_status": self.waiting_status,
+                "archivist_status": self.archivist_status
             }
+
+
+def get_reporter_agent() -> ReporterAgent:
+    """Get singleton ReporterAgent instance to maintain state across requests"""
+    global _reporter_agent_instance
+    if _reporter_agent_instance is None:
+        _reporter_agent_instance = ReporterAgent()
+    return _reporter_agent_instance
 
 
 class ReporterAgentExecutor(AgentExecutor):
     """AgentExecutor for the Reporter agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = ReporterAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_reporter_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -1136,7 +973,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
     """Create the Reporter agent card"""
     return AgentCard(
         name="Reporter",
-        description="Writes news articles based on story assignments using AI-powered content generation",
+        description="Writes news articles based on story assignments and submits drafts to News Chief for workflow management",
         url=f"http://{host}:{port}",
         version="1.0.0",
         preferred_transport="JSONRPC",
@@ -1169,33 +1006,13 @@ def create_agent_card(host: str, port: int) -> AgentCard:
                 ]
             ),
             AgentSkill(
-                id="article.writing.submit_draft",
-                name="Submit Draft",
-                description="Submits completed article draft for editorial review via A2A",
-                tags=["writing", "workflow"],
-                examples=[
-                    '{"action": "submit_draft", "story_id": "story_123"}',
-                    "Submit completed draft"
-                ]
-            ),
-            AgentSkill(
                 id="article.writing.apply_edits",
                 name="Apply Editorial Suggestions",
-                description="Applies editorial feedback and suggested edits to revise the article",
+                description="Applies editorial feedback from News Chief and submits revised draft back to News Chief",
                 tags=["editing", "revision", "ai-integration"],
                 examples=[
                     '{"action": "apply_edits", "story_id": "story_123"}',
                     "Apply editor's suggestions to article"
-                ]
-            ),
-            AgentSkill(
-                id="article.writing.publish_article",
-                name="Publish Article",
-                description="Publishes the final article to a markdown file in the articles directory",
-                tags=["publishing", "output", "workflow"],
-                examples=[
-                    '{"action": "publish_article", "story_id": "story_123"}',
-                    "Publish final article to file"
                 ]
             ),
             AgentSkill(
@@ -1235,7 +1052,18 @@ def create_app(host='localhost', port=8081):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    return app
 
 
 # Create default app instance for uvicorn
@@ -1248,30 +1076,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Reporter Agent server."""
-    try:
-        logger.info(f'Starting Reporter Agent server on {host}:{port}')
-        print(f"📝 Reporter Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.reporter:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Reporter",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.reporter:app" if reload else None
+    )
 
 
 if __name__ == "__main__":

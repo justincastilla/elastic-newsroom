@@ -11,8 +11,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 import click
-import uvicorn
 import httpx
+from starlette.middleware.cors import CORSMiddleware
 
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
@@ -20,26 +20,26 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from a2a.client import ClientFactory, ClientConfig, A2ACardResolver, create_text_message_object
+from a2a.client import create_text_message_object
+from utils import setup_logger, run_agent_server
+from agents.base_agent import BaseAgent
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [NEWS_CHIEF] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging using centralized utility
+logger = setup_logger("NEWS_CHIEF")
 
 
-class NewsChiefAgent:
+class NewsChiefAgent(BaseAgent):
     """News Chief Agent - Coordinates newsroom workflow and assigns stories"""
 
-    def __init__(self, reporter_url: Optional[str] = None):
+    def __init__(self, reporter_url: Optional[str] = None, editor_url: Optional[str] = None, publisher_url: Optional[str] = None):
+        # Initialize base agent with logger
+        super().__init__(logger)
+
         self.active_stories: Dict[str, Dict[str, Any]] = {}
         self.available_reporters: List[str] = []
         self.reporter_url = reporter_url or "http://localhost:8081"
+        self.editor_url = editor_url or "http://localhost:8082"
+        self.publisher_url = publisher_url or "http://localhost:8084"
         self.reporter_client = None
     
     async def invoke(self, query: str) -> Dict[str, Any]:
@@ -53,16 +53,28 @@ class NewsChiefAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"') and not query.startswith('{"action": "get_story_status"') and not query.startswith('{"action": "list_active_stories"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "assign_story", "story": {"topic": query}}
             action = query_data.get("action", "assign_story")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action not in ["get_status", "get_story_status", "list_active_stories"]:
+                logger.info(f"🎯 Action: {action}")
 
             if action == "assign_story":
                 return await self._assign_story(query_data)
+            elif action == "submit_draft":
+                return await self._submit_draft(query_data)
+            elif action == "route_to_editor":
+                return await self._route_to_editor(query_data)
+            elif action == "route_to_reporter":
+                return await self._route_to_reporter(query_data)
+            elif action == "route_to_publisher":
+                return await self._route_to_publisher(query_data)
             elif action == "get_story_status":
                 return await self._get_story_status(query_data)
             elif action == "list_active_stories":
@@ -73,7 +85,7 @@ class NewsChiefAgent:
                 return {
                     "status": "error",
                     "message": f"Unknown action: {action}",
-                    "available_actions": ["assign_story", "get_story_status", "list_active_stories", "register_reporter"]
+                    "available_actions": ["assign_story", "submit_draft", "route_to_editor", "route_to_reporter", "route_to_publisher", "get_story_status", "list_active_stories", "register_reporter"]
                 }
 
         except json.JSONDecodeError as e:
@@ -146,6 +158,18 @@ class NewsChiefAgent:
 
         self.active_stories[story_id] = story_assignment
 
+        # Publish event: story assigned
+        await self._publish_event(
+            event_type="story_assigned",
+            story_id=story_id,
+            data={
+                "topic": topic,
+                "priority": priority,
+                "target_length": target_length,
+                "angle": story_assignment.get("angle", "")
+            }
+        )
+
         logger.info(f"✅ Story created: {story_id}")
         logger.info(f"   Topic: {story_assignment['topic']}")
         logger.info(f"   Status: {story_assignment['status']}")
@@ -212,21 +236,323 @@ class NewsChiefAgent:
             "available_reporters": self.available_reporters
         }
 
+    async def _submit_draft(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle draft submission from Reporter"""
+        logger.info("📝 Processing draft submission...")
+        
+        story_id = request.get("story_id")
+        draft = request.get("draft", {})
+        
+        if not story_id or not draft:
+            return {
+                "status": "error",
+                "message": "Missing story_id or draft data"
+            }
+        
+        # Debug: Log all active stories
+        logger.info(f"🔍 Active stories in News Chief: {list(self.active_stories.keys())}")
+        logger.info(f"🔍 Looking for story: {story_id}")
+        
+        if story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        # Update story with draft
+        self.active_stories[story_id]["draft"] = draft
+        self.active_stories[story_id]["status"] = "draft_submitted"
+        self.active_stories[story_id]["updated_at"] = datetime.now().isoformat()
+        
+        logger.info(f"✅ Draft submitted for story {story_id}")
+        logger.info(f"   Word count: {draft.get('word_count', 'N/A')}")
+        
+        # Auto-route to Editor
+        logger.info("🔄 Auto-routing to Editor for review...")
+        return await self._route_to_editor({"story_id": story_id})
+
+    async def _route_to_editor(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story to Editor for review"""
+        logger.info("✏️ Routing story to Editor...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        draft = story.get("draft", {})
+        
+        if not draft:
+            return {
+                "status": "error",
+                "message": "No draft available for review"
+            }
+        
+        # Update story status
+        story["status"] = "under_review"
+        story["updated_at"] = datetime.now().isoformat()
+
+        # Publish event: editor review requested
+        await self._publish_event(
+            event_type="editor_review_requested",
+            story_id=story_id,
+            data={"word_count": draft.get("word_count")}
+        )
+
+        # Send to Editor
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using BaseAgent helper
+                editor_client, _ = await self._create_a2a_client(
+                    http_client, self.editor_url, "Editor"
+                )
+
+                # Send review request
+                review_request = {
+                    "action": "review_draft",
+                    "draft": draft
+                }
+                message = create_text_message_object(content=json.dumps(review_request))
+                
+                # Get response
+                async for response in editor_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            review_result = json.loads(text_content)
+                            logger.info(f"✅ Editor review completed")
+                            
+                            # Store review
+                            story["editor_review"] = review_result
+                            story["status"] = "reviewed"
+                            story["updated_at"] = datetime.now().isoformat()
+                            
+                            # Auto-route back to Reporter if revisions needed
+                            if review_result.get("review", {}).get("approval_status") == "needs_minor_revisions":
+                                logger.info("🔄 Auto-routing back to Reporter for revisions...")
+                                return await self._route_to_reporter({"story_id": story_id})
+                            else:
+                                # Ready for publication
+                                logger.info("✅ Story approved, routing to Publisher...")
+                                return await self._route_to_publisher({"story_id": story_id})
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed to Editor",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Editor: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Editor: {str(e)}"
+            }
+
+    async def _route_to_reporter(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story back to Reporter for revisions"""
+        logger.info("📝 Routing story back to Reporter for revisions...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        story["status"] = "needs_revision"
+        story["updated_at"] = datetime.now().isoformat()
+        
+        # Send to Reporter for revisions
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
+
+                # Send revision request
+                revision_request = {
+                    "action": "apply_edits",
+                    "story_id": story_id,
+                    "editor_review": story.get("editor_review", {})
+                }
+                message = create_text_message_object(content=json.dumps(revision_request))
+                
+                # Get response
+                async for response in reporter_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            revision_result = json.loads(text_content)
+                            logger.info(f"✅ Revisions applied")
+                            
+                            # Update story with revised draft
+                            if "draft" in revision_result:
+                                story["draft"] = revision_result["draft"]
+                                story["status"] = "revised"
+                                story["updated_at"] = datetime.now().isoformat()
+                                
+                                # Auto-route to Publisher
+                                logger.info("✅ Revisions complete, routing to Publisher...")
+                                return await self._route_to_publisher({"story_id": story_id})
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed back to Reporter",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Reporter: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Reporter: {str(e)}"
+            }
+
+    async def _route_to_publisher(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Route story to Publisher for publication"""
+        logger.info("📰 Routing story to Publisher...")
+        
+        story_id = request.get("story_id")
+        if not story_id or story_id not in self.active_stories:
+            return {
+                "status": "error",
+                "message": f"Story {story_id} not found"
+            }
+        
+        story = self.active_stories[story_id]
+        draft = story.get("draft", {})
+        
+        if not draft:
+            return {
+                "status": "error",
+                "message": "No draft available for publication"
+            }
+        
+        # Update story status
+        story["status"] = "publishing"
+        story["updated_at"] = datetime.now().isoformat()
+
+        # Publish event: publication requested
+        await self._publish_event(
+            event_type="publication_requested",
+            story_id=story_id,
+            data={"word_count": draft.get("word_count")}
+        )
+
+        # Send to Publisher
+        try:
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using BaseAgent helper
+                publisher_client, _ = await self._create_a2a_client(
+                    http_client, self.publisher_url, "Publisher"
+                )
+
+                # Send publication request
+                publish_request = {
+                    "action": "publish_article",
+                    "article": draft
+                }
+                message = create_text_message_object(content=json.dumps(publish_request))
+                
+                # Get response
+                async for response in publisher_client.send_message(message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            publish_result = json.loads(text_content)
+                            logger.info(f"✅ Article published")
+                            
+                            # Update story status
+                            story["status"] = "published"
+                            story["published_at"] = datetime.now().isoformat()
+                            story["updated_at"] = datetime.now().isoformat()
+                            story["publication_result"] = publish_result
+                            
+                            return {
+                                "status": "success",
+                                "message": "Story published successfully",
+                                "story_id": story_id,
+                                "publication_result": publish_result
+                            }
+                            break
+                
+                return {
+                    "status": "success",
+                    "message": "Story routed to Publisher",
+                    "story_id": story_id
+                }
+                
+        except Exception as e:
+            logger.error(f"Failed to route to Publisher: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to contact Publisher: {str(e)}"
+            }
+
+    async def _trigger_write_async(self, story_id: str):
+        """Trigger article writing asynchronously without blocking"""
+        try:
+            logger.info(f"🔄 Background task: Sending write command for story {story_id}")
+
+            # Create a new HTTP client for this async task
+            async with httpx.AsyncClient(timeout=300.0) as http_client:
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
+
+                # Send write_article command
+                write_request = {
+                    "action": "write_article",
+                    "story_id": story_id
+                }
+                write_message = create_text_message_object(content=json.dumps(write_request))
+
+                async for response in reporter_client.send_message(write_message):
+                    if hasattr(response, 'parts'):
+                        part = response.parts[0]
+                        text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
+                        if text_content:
+                            write_result = json.loads(text_content)
+                            logger.info(f"✅ Background task: Write command completed")
+                            logger.info(f"   Status: {write_result.get('status')}")
+                            logger.info(f"   Message: {write_result.get('message')}")
+
+                            # Update story status based on result
+                            if story_id in self.active_stories:
+                                if write_result.get('status') == 'success':
+                                    self.active_stories[story_id]['status'] = 'completed'
+                                    # Store article data for UI retrieval
+                                    if 'article_data' in write_result:
+                                        self.active_stories[story_id]['article_data'] = write_result['article_data']
+                                        logger.info(f"✅ Stored article data for story {story_id}")
+                                else:
+                                    self.active_stories[story_id]['status'] = 'error'
+                            break
+        except Exception as e:
+            logger.error(f"Background task error for story {story_id}: {e}")
+            if story_id in self.active_stories:
+                self.active_stories[story_id]['status'] = 'error'
+
     async def _send_to_reporter(self, assignment: Dict[str, Any]) -> Dict[str, Any]:
         """Send story assignment to Reporter agent via A2A"""
         try:
             async with httpx.AsyncClient(timeout=60.0) as http_client:
-                # Discover Reporter agent
-                logger.info(f"🔍 Discovering Reporter agent at {self.reporter_url}")
-                card_resolver = A2ACardResolver(http_client, self.reporter_url)
-                reporter_card = await card_resolver.get_agent_card()
-                logger.info(f"✅ Found Reporter: {reporter_card.name} (v{reporter_card.version})")
-
-                # Create A2A client
-                logger.info(f"🔧 Creating A2A client...")
-                client_config = ClientConfig(httpx_client=http_client, streaming=False)
-                client_factory = ClientFactory(client_config)
-                reporter_client = client_factory.create(reporter_card)
+                # Create A2A client using BaseAgent helper
+                reporter_client, _ = await self._create_a2a_client(
+                    http_client, self.reporter_url, "Reporter"
+                )
 
                 # Send accept_assignment task to Reporter
                 request = {
@@ -240,22 +566,43 @@ class NewsChiefAgent:
 
                 message = create_text_message_object(content=json.dumps(request))
 
-                # Get response
+                # Get response for assignment acceptance
                 logger.info(f"⏳ Waiting for Reporter response...")
+                assignment_result = None
                 async for response in reporter_client.send_message(message):
                     if hasattr(response, 'parts'):
                         part = response.parts[0]
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
-                            result = json.loads(text_content)
+                            assignment_result = json.loads(text_content)
                             logger.info(f"📬 Received A2A response from Reporter:")
-                            logger.info(f"   Status: {result.get('status')}")
-                            logger.info(f"   Message: {result.get('message')}")
-                            logger.info(f"   Reporter Status: {result.get('reporter_status')}")
-                            return result
+                            logger.info(f"   Status: {assignment_result.get('status')}")
+                            logger.info(f"   Message: {assignment_result.get('message')}")
+                            logger.info(f"   Reporter Status: {assignment_result.get('reporter_status')}")
+                            break
 
-                logger.warning("⚠️  No response from Reporter")
-                return {"status": "error", "message": "No response from Reporter"}
+                if not assignment_result:
+                    logger.warning("⚠️  No response from Reporter")
+                    return {"status": "error", "message": "No response from Reporter"}
+
+                # If assignment was accepted, trigger the Reporter to start writing (async, don't wait)
+                if assignment_result.get('status') == 'success':
+                    logger.info(f"✅ Assignment accepted, triggering article writing in background...")
+
+                    # Update story status to 'writing'
+                    story_id = assignment.get('story_id')
+                    if story_id in self.active_stories:
+                        self.active_stories[story_id]['status'] = 'writing'
+
+                    # Send write_article command but don't wait for response
+                    # The Reporter will work asynchronously
+                    import asyncio
+                    logger.info(f"📝 Triggering write_article command (async)...")
+
+                    # Fire and forget - don't wait for the response
+                    asyncio.create_task(self._trigger_write_async(story_id))
+
+                return assignment_result
 
         except Exception as e:
             logger.error(f"Failed to send assignment to Reporter: {e}", exc_info=True)
@@ -265,11 +612,23 @@ class NewsChiefAgent:
             }
 
 
+# Singleton instance of the News Chief agent to maintain state across requests
+_news_chief_agent_instance = None
+
+def get_news_chief_agent():
+    """Get or create the singleton News Chief agent instance"""
+    global _news_chief_agent_instance
+    if _news_chief_agent_instance is None:
+        _news_chief_agent_instance = NewsChiefAgent()
+    return _news_chief_agent_instance
+
+
 class NewsChiefAgentExecutor(AgentExecutor):
     """AgentExecutor for the News Chief agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = NewsChiefAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_news_chief_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -297,7 +656,6 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         url=f"http://{host}:{port}",
         version="1.0.0",
         preferred_transport="JSONRPC",
-        documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/news-chief-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
             push_notifications=True,
@@ -313,6 +671,46 @@ def create_agent_card(host: str, port: int) -> AgentCard:
                 examples=[
                     '{"action": "assign_story", "story": {"topic": "Renewable Energy Adoption", "priority": "high"}}',
                     "Assign a story about climate change"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.draft_management",
+                name="Draft Management",
+                description="Handles draft submissions from reporters and routes them through the editorial process",
+                tags=["coordination", "draft-management"],
+                examples=[
+                    '{"action": "submit_draft", "story_id": "story_123", "draft": {...}}',
+                    "Submit a draft for editorial review"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.editorial_routing",
+                name="Editorial Routing",
+                description="Routes stories to Editor for review and manages the editorial workflow",
+                tags=["coordination", "editorial"],
+                examples=[
+                    '{"action": "route_to_editor", "story_id": "story_123"}',
+                    "Route story to Editor for review"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.revision_routing",
+                name="Revision Routing",
+                description="Routes stories back to Reporter for revisions based on editorial feedback",
+                tags=["coordination", "revisions"],
+                examples=[
+                    '{"action": "route_to_reporter", "story_id": "story_123"}',
+                    "Route story back to Reporter for revisions"
+                ]
+            ),
+            AgentSkill(
+                id="newsroom.coordination.publication_routing",
+                name="Publication Routing",
+                description="Routes approved stories to Publisher for final publication",
+                tags=["coordination", "publication"],
+                examples=[
+                    '{"action": "route_to_publisher", "story_id": "story_123"}',
+                    "Route story to Publisher for publication"
                 ]
             ),
             AgentSkill(
@@ -361,7 +759,59 @@ def create_app(host='localhost', port=8080):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Add minimal UI endpoints (simple wrappers around invoke())
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse
+
+    async def ui_assign_story(request):
+        """UI endpoint for story assignment"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def ui_story_status(request):
+        """UI endpoint for story status"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    async def ui_active_stories(request):
+        """UI endpoint for active stories list"""
+        try:
+            data = await request.json()
+            agent = get_news_chief_agent()
+            result = await agent.invoke(json.dumps(data))
+            return JSONResponse(result)
+        except Exception as e:
+            return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+    # Add UI routes
+    app.router.routes.extend([
+        Route("/assign-story", ui_assign_story, methods=["POST"]),
+        Route("/story-status", ui_story_status, methods=["POST"]),
+        Route("/active-stories", ui_active_stories, methods=["POST"]),
+    ])
+
+    return app
 
 
 # Create default app instance for uvicorn
@@ -374,30 +824,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the News Chief Agent server."""
-    try:
-        logger.info(f'Starting News Chief Agent server on {host}:{port}')
-        print(f"🚀 News Chief Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.news_chief:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="News Chief",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.news_chief:app" if reload else None
+    )
 
 
 if __name__ == "__main__":

@@ -12,50 +12,36 @@ from typing import Dict, Any, List
 from datetime import datetime
 
 import click
-import uvicorn
-from anthropic import Anthropic
-from dotenv import dotenv_values
-
-# Load environment variables
-env_config = dotenv_values('.env')
-if env_config:
-    for key, value in env_config.items():
-        if value and not os.getenv(key):
-            os.environ[key] = value
-
+from starlette.middleware.cors import CORSMiddleware
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+from agents.base_agent import BaseAgent
 
-# Configure logging - only to file, not console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [RESEARCHER] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('newsroom.log', mode='a')
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_env_config()
 
+# Configure logging using centralized utility
+logger = setup_logger("RESEARCHER")
 
-class ResearcherAgent:
+# Singleton instance for maintaining state across requests
+_researcher_agent_instance = None
+
+class ResearcherAgent(BaseAgent):
     """Researcher Agent - Provides factual information and supporting data"""
 
     def __init__(self):
-        self.research_history: Dict[str, Dict[str, Any]] = {}
-        self.anthropic_client = None
+        # Initialize base agent with logger
+        super().__init__(logger)
 
-        # Initialize Anthropic client if API key is available
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if api_key:
-            self.anthropic_client = Anthropic(api_key=api_key)
-            logger.info("✅ Anthropic client initialized")
-        else:
-            logger.warning("⚠️  ANTHROPIC_API_KEY not set - will use mock research")
+        self.research_history: Dict[str, Dict[str, Any]] = {}
+
+        # Initialize Anthropic client using centralized utility (from BaseAgent)
+        self._init_anthropic_client()
 
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
@@ -68,13 +54,17 @@ class ResearcherAgent:
             Dictionary with the result of the action
         """
         try:
-            logger.info(f"📥 Received query: {query[:200]}...")
+            # Only log non-status queries to reduce log spam
+            if not query.startswith('{"action": "get_status"'):
+                logger.info(f"📥 Received query: {query[:200]}...")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
             action = query_data.get("action")
 
-            logger.info(f"🎯 Action: {action}")
+            # Only log non-status actions to reduce log spam
+            if action != "get_status":
+                logger.info(f"🎯 Action: {action}")
 
             if action == "research_questions":
                 return await self._research_questions(query_data)
@@ -124,6 +114,13 @@ class ResearcherAgent:
         for i, question in enumerate(questions[:5], 1):
             logger.info(f"   {i}. {question}")
 
+        # Publish event: research started
+        await self._publish_event(
+            event_type="research_started",
+            story_id=story_id,
+            data={"topic": topic, "question_count": len(questions)}
+        )
+
         # Process all questions in a single API call
         try:
             research_results = await self._conduct_bulk_research(questions[:5], topic)
@@ -149,6 +146,17 @@ class ResearcherAgent:
             "total_questions": len(questions)
         }
         self.research_history[research_id] = research_record
+
+        # Publish event: research completed
+        await self._publish_event(
+            event_type="research_completed",
+            story_id=story_id,
+            data={
+                "topic": topic,
+                "question_count": len(questions),
+                "results_count": len(research_results)
+            }
+        )
 
         logger.info(f"✅ Research completed")
         logger.info(f"   Research ID: {research_id}")
@@ -237,11 +245,8 @@ Provide ONLY the JSON array, no additional text."""
 
                 # Parse the JSON response
                 research_text = message.content[0].text
-                # Try to extract JSON if there's any markdown formatting
-                if "```json" in research_text:
-                    research_text = research_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in research_text:
-                    research_text = research_text.split("```")[1].split("```")[0].strip()
+                # Use BaseAgent helper to strip markdown code blocks
+                research_text = self._strip_json_codeblocks(research_text)
 
                 results = json.loads(research_text)
                 logger.info(f"✅ Received {len(results)} research results from Anthropic")
@@ -331,11 +336,20 @@ Provide ONLY the JSON array, no additional text."""
         }
 
 
+def get_researcher_agent() -> ResearcherAgent:
+    """Get singleton ResearcherAgent instance to maintain state across requests"""
+    global _researcher_agent_instance
+    if _researcher_agent_instance is None:
+        _researcher_agent_instance = ResearcherAgent()
+    return _researcher_agent_instance
+
+
 class ResearcherAgentExecutor(AgentExecutor):
     """AgentExecutor for the Researcher agent following official A2A pattern"""
 
     def __init__(self):
-        self.agent = ResearcherAgent()
+        # Use singleton instance to maintain state across requests
+        self.agent = get_researcher_agent()
 
     async def execute(self, context, event_queue) -> None:
         """Execute the agent request"""
@@ -424,7 +438,18 @@ def create_app(host='localhost', port=8083):
         http_handler=request_handler
     )
 
-    return server.build()
+    app = server.build()
+
+    # Add CORS middleware for React UI
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://localhost:3001"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    return app
 
 
 # Create default app instance for uvicorn
@@ -437,30 +462,15 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Researcher Agent server."""
-    try:
-        logger.info(f'Starting Researcher Agent server on {host}:{port}')
-        print(f"🔬 Researcher Agent is running on http://{host}:{port}")
-        print(f"📋 Agent Card available at: http://{host}:{port}/.well-known/agent-card.json")
-        if reload:
-            print(f"🔄 Hot reload enabled - watching for file changes")
-
-        # Run the server with optional hot reload
-        if reload:
-            uvicorn.run(
-                "agents.researcher:app",
-                host=host,
-                port=port,
-                reload=True,
-                reload_dirs=["./agents"]
-            )
-        else:
-            app_instance = create_app(host, port)
-            uvicorn.run(app_instance, host=host, port=port)
-
-    except Exception as e:
-        logger.error(f'An error occurred during server startup: {e}')
-        print(f"❌ Error starting server: {e}")
-        raise
+    run_agent_server(
+        agent_name="Researcher",
+        host=host,
+        port=port,
+        create_app_func=lambda: create_app(host, port),
+        logger=logger,
+        reload=reload,
+        reload_module="agents.researcher:app" if reload else None
+    )
 
 
 if __name__ == "__main__":
