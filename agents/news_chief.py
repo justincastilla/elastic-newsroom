@@ -655,10 +655,11 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Coordinates newsroom workflow and assigns stories to specialized agents",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=50
         ),

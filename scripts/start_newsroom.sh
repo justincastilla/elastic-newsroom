@@ -53,32 +53,66 @@ if [ "$1" == "--stop" ]; then
     echo -e "${YELLOW}🛑 Stopping all newsroom agents...${NC}"
     echo ""
 
-    # Stop using PID file first
+    # Kill all uvicorn processes related to our agents
+    echo -e "${YELLOW}   Killing all uvicorn agent processes...${NC}"
+    pkill -9 -f "uvicorn agents" 2>/dev/null || true
+    pkill -9 -f "uvicorn services" 2>/dev/null || true
+
+    # Kill any remaining Python processes running our modules
+    pkill -9 -f "agents.news_chief" 2>/dev/null || true
+    pkill -9 -f "agents.reporter" 2>/dev/null || true
+    pkill -9 -f "agents.editor" 2>/dev/null || true
+    pkill -9 -f "agents.researcher" 2>/dev/null || true
+    pkill -9 -f "agents.publisher" 2>/dev/null || true
+    pkill -9 -f "services.event_hub" 2>/dev/null || true
+    pkill -9 -f "services.article_api" 2>/dev/null || true
+
+    # Stop using PID file
     if [ -f "$PID_FILE" ]; then
         while IFS= read -r line; do
             NAME=$(echo "$line" | cut -d: -f1)
             PID=$(echo "$line" | cut -d: -f2)
 
             if ps -p "$PID" > /dev/null 2>&1; then
-                echo -e "${YELLOW}   Stopping $NAME (PID: $PID)...${NC}"
-                kill "$PID" 2>/dev/null || true
+                echo -e "${YELLOW}   Stopping $NAME (PID: $PID) and all children...${NC}"
+                # Kill the process and all its children
+                pkill -9 -P "$PID" 2>/dev/null || true
+                kill -9 "$PID" 2>/dev/null || true
             fi
         done < "$PID_FILE"
         rm "$PID_FILE"
     fi
 
-    # Also kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
-    echo -e "${YELLOW}   Checking for processes on ports 8080-8085, 8090, 3000...${NC}"
-    for port in 8080 8081 8082 8083 8084 8085 8090 3000; do
-        PID=$(lsof -ti:$port 2>/dev/null)
-        if [ -n "$PID" ]; then
-            echo -e "${YELLOW}   Killing process on port $port (PID: $PID)...${NC}"
-            kill -9 "$PID" 2>/dev/null || true
+    # Force kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
+    echo -e "${YELLOW}   Force killing any remaining processes on ports...${NC}"
+    for port in 8080 8081 8082 8083 8084 8085 8090 3000 3001; do
+        PIDS=$(lsof -ti:$port 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            for PID in $PIDS; do
+                echo -e "${YELLOW}   Force killing process on port $port (PID: $PID)...${NC}"
+                kill -9 "$PID" 2>/dev/null || true
+            done
+        fi
+    done
+
+    # Give it a moment to clean up
+    sleep 1
+
+    # Final verification - check if any ports are still in use
+    STILL_IN_USE=""
+    for port in 8080 8081 8082 8083 8084 8085 8090 3000 3001; do
+        if lsof -ti:$port > /dev/null 2>&1; then
+            STILL_IN_USE="$STILL_IN_USE $port"
         fi
     done
 
     echo ""
-    echo -e "${GREEN}✅ All agents stopped${NC}"
+    if [ -n "$STILL_IN_USE" ]; then
+        echo -e "${RED}⚠️  Warning: Some ports still in use:$STILL_IN_USE${NC}"
+        echo -e "${YELLOW}   You may need to manually kill these processes${NC}"
+    else
+        echo -e "${GREEN}✅ All agents stopped successfully${NC}"
+    fi
     exit 0
 fi
 

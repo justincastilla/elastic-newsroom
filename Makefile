@@ -1,4 +1,4 @@
-.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-verbose install clean start stop
+.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose install clean start stop
 
 # Default target
 help:
@@ -12,6 +12,7 @@ help:
 	@echo "  make test-unit         - Run only unit tests"
 	@echo "  make test-integration  - Run integration tests"
 	@echo "  make test-workflow     - Run full workflow test"
+	@echo "  make test-archivist    - Run Archivist A2A integration tests"
 	@echo "  make test-verbose      - Run tests with verbose output"
 	@echo "  make test-coverage     - Run tests with coverage report"
 	@echo ""
@@ -48,6 +49,10 @@ test-integration:
 test-workflow:
 	@echo "🧪 Running workflow tests..."
 	pytest -v -m workflow tests/test_workflow_pytest.py
+
+test-archivist:
+	@echo "🧪 Running Archivist A2A integration tests..."
+	pytest -v tests/test_archivist_a2a.py
 
 test-verbose:
 	@echo "🧪 Running tests with verbose output..."

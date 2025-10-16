@@ -8,6 +8,7 @@ Uses Anthropic Claude for AI-powered content generation.
 import json
 import os
 import time
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -23,6 +24,7 @@ from a2a.utils import new_agent_text_message
 from a2a.client import create_text_message_object
 from utils import setup_logger, load_env_config, run_agent_server
 from agents.base_agent import BaseAgent
+from agents.archivist_client import call_archivist
 
 # Load environment variables
 load_env_config()
@@ -50,33 +52,17 @@ class ReporterAgent(BaseAgent):
         self.editor_url = editor_url or "http://localhost:8082"
         self.researcher_url = researcher_url or "http://localhost:8083"
         self.publisher_url = publisher_url or "http://localhost:8084"
-        # Get Archivist URL from environment or parameter
-        self.archivist_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")
-        self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
 
-        # Parse Archivist URL once during initialization (cached for efficiency)
-        self._archivist_endpoint: Optional[str] = None
-        self._archivist_agent_id: Optional[str] = None
-        if self.archivist_url:
-            self._parse_archivist_url()
+        # Get Archivist configuration from environment
+        # Prefer direct agent URL over agent card URL
+        self.archivist_agent_url = os.getenv("ELASTIC_ARCHIVIST_AGENT_URL")  # Direct endpoint (preferred)
+        self.archivist_card_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")  # Agent card URL (fallback)
+        self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
 
         # Initialize Anthropic client using centralized utility (from BaseAgent)
         self._init_anthropic_client()
         if not self.anthropic_client:
             logger.warning("Will use mock article generation")
-
-    def _parse_archivist_url(self):
-        """Parse Archivist URL once during initialization for efficiency"""
-        if "/api/agent_builder/a2a/" in self.archivist_url:
-            # Extract agent_id from URL
-            agent_id = self.archivist_url.split("/")[-1]
-            if agent_id.endswith(".json"):
-                agent_id = agent_id[:-5]
-
-            # Build converse API endpoint
-            base_url = self.archivist_url.split("/api/agent_builder/")[0]
-            self._archivist_endpoint = f"{base_url}/api/agent_builder/a2a/archive-agent"
-            self._archivist_agent_id = agent_id
 
     # Note: Helper methods (_error_response, _success_response, _create_a2a_client,
     # _parse_a2a_response, _strip_json_codeblocks, _call_anthropic) are now
@@ -216,7 +202,6 @@ class ReporterAgent(BaseAgent):
             logger.info(f"   Research questions identified: {len(research_questions)}")
 
             # Call both Researcher and Archivist in parallel
-            import asyncio
             research_results = None
             archive_results = None
 
@@ -471,172 +456,38 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
             return self._error_response(f"Failed to contact Researcher: {str(e)}")
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for historical articles via Archivist agent using A2A JSONRPC protocol with retry logic"""
-        # Check if Archivist URL is configured
-        if not self.archivist_url or not self._archivist_endpoint or not self._archivist_agent_id:
-            logger.error("❌ ELASTIC_ARCHIVIST_AGENT_CARD_URL not set or invalid - Archivist is REQUIRED")
-            raise Exception("Archivist agent card URL not configured or invalid - Archivist is REQUIRED for workflow")
+        """Search for historical articles via Archivist agent using the archivist_client module"""
+        # Check if Archivist is configured
+        if not self.archivist_agent_url and not self.archivist_card_url:
+            logger.error("❌ Neither ELASTIC_ARCHIVIST_AGENT_URL nor ELASTIC_ARCHIVIST_AGENT_CARD_URL is set - Archivist is REQUIRED")
+            raise Exception("Archivist URL not configured - Archivist is REQUIRED for workflow")
+
+        if not self.archivist_api_key:
+            logger.error("❌ ELASTIC_ARCHIVIST_API_KEY not set - Archivist is REQUIRED")
+            raise Exception("Archivist API key not configured - Archivist is REQUIRED for workflow")
 
         # Build search query from topic and angle
         topic = assignment.get("topic", "")
         angle = assignment.get("angle", "")
         search_query = f"Find articles about {topic} {angle}".strip()
 
-        logger.info(f"🔍 Connecting to Archivist agent via A2A JSONRPC protocol")
+        logger.info(f"🔍 Calling Archivist via archivist_client module")
         logger.info(f"   Search query: '{search_query}'")
-        logger.info(f"   A2A endpoint: {self._archivist_endpoint}")
-        logger.info(f"   Agent ID: {self._archivist_agent_id}")
 
-        # Create headers with API key (per A2A docs: requires kbn-xsrf header)
-        headers = {
-            "Content-Type": "application/json",
-            "kbn-xsrf": "kibana"
-        }
-
-        if self.archivist_api_key:
-            headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
-            logger.info(f"🔑 Using API key authentication")
-        else:
-            logger.error("❌ ELASTIC_ARCHIVIST_API_KEY not set - Archivist is REQUIRED")
-            raise Exception("Archivist API key not configured - Archivist is REQUIRED for workflow")
-
-        # Generate unique message ID using timestamp and story_id
-        timestamp_ms = int(time.time() * 1000)
-        message_id = f"msg-{timestamp_ms}-{story_id.replace('_', '')[:8]}"
-
-        # Build A2A JSONRPC request (per A2A protocol spec)
-        a2a_request = {
-            "id": message_id,
-            "jsonrpc": "2.0",
-            "method": "message/send",
-            "params": {
-                "configuration": {
-                    "acceptedOutputModes": [
-                        "text/plain",
-                        "video/mp4"
-                    ]
-                },
-                "message": {
-                    "kind": "message",
-                    "messageId": message_id,
-                    "metadata": {},
-                    "parts": [
-                        {
-                            "kind": "text",
-                            "text": search_query
-                        }
-                    ],
-                    "role": "user"
-                }
-            }
-        }
-
-        logger.info(f"📨 Sending A2A JSONRPC request:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Message ID: {message_id}")
-        logger.info(f"   Search query: {search_query}")
-
-        # Retry logic: up to 3 attempts with 60-second timeout each
-        max_attempts = 3
-        timeout_seconds = 60
-        
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info(f"🔄 Archivist attempt {attempt}/{max_attempts} (timeout: {timeout_seconds}s)")
-                start_time = time.time()
-
-                async with httpx.AsyncClient(timeout=timeout_seconds) as http_client:
-                    logger.info(f"⏳ Waiting for Archivist A2A response...")
-
-                    response = await http_client.post(
-                        self._archivist_endpoint,
-                        json=a2a_request,
-                        headers=headers
-                    )
-
-                    elapsed = time.time() - start_time
-                    logger.info(f"📥 Received response in {elapsed:.1f} seconds")
-                    logger.info(f"   Status Code: {response.status_code}")
-
-                    response.raise_for_status()
-                    result = response.json()
-
-                    # Check if response is empty
-                    response_text = response.text.strip()
-                    if not response_text or response_text == '""' or response_text == "":
-                        if attempt < max_attempts:
-                            logger.warning(f"⚠️  Archivist returned empty response on attempt {attempt} - retrying...")
-                            continue
-                        else:
-                            logger.error(f"❌ Archivist returned empty response after {max_attempts} attempts - REQUIRED component failed")
-                            raise Exception(f"Archivist returned empty response after {max_attempts} attempts - Archivist is REQUIRED")
-
-                    # Extract text response from A2A JSONRPC response
-                    # Response structure: {"jsonrpc": "2.0", "id": "msg-...", "result": {...}}
-                    if "error" in result:
-                        error_msg = result.get("error", {}).get("message", "Unknown error")
-                        logger.error(f"❌ Archivist returned A2A error: {error_msg}")
-                        if attempt < max_attempts:
-                            logger.info(f"🔄 Retrying after A2A error...")
-                            continue
-                        else:
-                            raise Exception(f"Archivist A2A error after {max_attempts} attempts: {error_msg}")
-
-                    a2a_result = result.get("result", {})
-
-                    # Extract the message parts from A2A response
-                    full_response = ""
-                    articles = []
-
-                    message = a2a_result.get("message", {})
-                    parts = message.get("parts", [])
-
-                    for part in parts:
-                        if part.get("kind") == "text":
-                            text_content = part.get("text", "")
-                            if text_content:
-                                full_response += text_content + "\n\n"
-
-                    # Log the results
-                    logger.info(f"")
-                    logger.info(f"📚 ARCHIVIST A2A SEARCH RESULTS (Attempt {attempt}):")
-                    logger.info(f"   🔍 Search Query: {search_query}")
-                    logger.info(f"   📨 Message ID: {message_id}")
-                    logger.info(f"   📝 Response length: {len(full_response)} characters")
-                    logger.info(f"   Preview: {full_response[:200]}...")
-                    logger.info(f"")
-
-                    # Success! Return the result
-                    logger.info(f"✅ Archivist succeeded on attempt {attempt}")
-                    return {
-                        "status": "success",
-                        "query": search_query,
-                        "response": full_response.strip(),
-                        "message_id": message_id,
-                        "articles": []  # A2A format may not return structured articles
-                    }
-
-            except httpx.TimeoutException as e:
-                elapsed = time.time() - start_time if 'start_time' in locals() else 0
-                logger.warning(f"⚠️  Archivist attempt {attempt} timed out after {elapsed:.1f} seconds: {e}")
-                
-                if attempt < max_attempts:
-                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
-                    continue
-                else:
-                    logger.error(f"❌ Archivist timed out after {max_attempts} attempts - REQUIRED component failed")
-                    raise Exception(f"Archivist timed out after {max_attempts} attempts - Archivist is REQUIRED")
-
-            except Exception as e:
-                elapsed = time.time() - start_time if 'start_time' in locals() else 0
-                logger.warning(f"⚠️  Archivist attempt {attempt} failed after {elapsed:.1f} seconds: {e}")
-                
-                if attempt < max_attempts:
-                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
-                    continue
-                else:
-                    logger.error(f"❌ Archivist failed after {max_attempts} attempts - REQUIRED component failed")
-                    raise Exception(f"Archivist failed after {max_attempts} attempts: {str(e)} - Archivist is REQUIRED")
+        # Call the archivist client (prefers direct agent URL)
+        try:
+            result = await call_archivist(
+                query=search_query,
+                story_id=story_id,
+                agent_url=self.archivist_agent_url,  # Direct endpoint (preferred)
+                agent_card_url=self.archivist_card_url,  # Fallback to agent card URL
+                api_key=self.archivist_api_key,
+                max_retries=10
+            )
+            return result
+        except Exception as e:
+            logger.error(f"❌ Archivist call failed: {e}")
+            raise
 
     async def _generate_article(self, assignment: Dict[str, Any], outline: str = "", research_results: Optional[List[Dict[str, Any]]] = None, archive_results: Optional[List[Dict[str, Any]]] = None) -> str:
         """Generate article content using Anthropic Claude with research data"""
@@ -976,11 +827,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Writes news articles based on story assignments and submits drafts to News Chief for workflow management",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/reporter-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=10
         ),

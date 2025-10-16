@@ -376,11 +376,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Provides factual information, background context, and supporting data with structured figures for news articles",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/researcher-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=30
         ),

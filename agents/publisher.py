@@ -565,11 +565,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Publishes finalized articles to Elasticsearch, handles CI/CD deployment, and sends CRM notifications. Works through News Chief for workflow coordination.",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/publisher-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=20
         ),

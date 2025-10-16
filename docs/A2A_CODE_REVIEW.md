@@ -20,45 +20,7 @@ All agents implement Agent Cards with basic metadata:
 
 ### Issues & Recommendations
 
-#### 1.1 Missing Security Declarations ⚠️ CRITICAL
-**File:** All agent files (`agents/*.py`)
-
-**Issue:** Agent Cards do not declare authentication/security schemes in the `security` field.
-
-**A2A Standard:** 
-> "The A2A server's Agent Card describes the authentication schemes it supports in its `security` field and aligns with those defined in the OpenAPI Specification for authentication."
-> — [Enterprise-Ready Features](https://github.com/a2aproject/A2A/blob/main/docs/topics/enterprise-ready.md)
-
-**Impact:** Clients cannot determine what authentication is required to interact with agents. This violates enterprise security best practices.
-
-**Recommendation:**
-Add `security` field to all Agent Cards:
-
-```python
-def create_agent_card(host: str, port: int) -> AgentCard:
-    return AgentCard(
-        name="News Chief",
-        description="...",
-        url=f"http://{host}:{port}",
-        version="1.0.0",
-        preferred_transport="JSONRPC",
-        security=[
-            {
-                "type": "apiKey",
-                "in": "header",
-                "name": "X-API-Key",
-                "description": "API key for authentication"
-            }
-        ],
-        # ... rest of card
-    )
-```
-
-**Priority:** HIGH - Required for enterprise compliance
-
----
-
-#### 1.2 Missing Protocol Version Declaration ⚠️
+#### 1.1 Missing Protocol Version Declaration ⚠️
 **File:** All agent files (`agents/*.py`)
 
 **Issue:** Agent Cards don't explicitly declare `protocolVersion`.
@@ -84,7 +46,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
 
 ---
 
-#### 1.3 Missing Transport Declarations ℹ️
+#### 1.2 Missing Transport Declarations ℹ️
 **File:** All agent files (`agents/*.py`)
 
 **Issue:** Agent Cards specify `preferred_transport="JSONRPC"` but don't declare `additionalInterfaces` for transport negotiation.
@@ -115,7 +77,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
 
 ---
 
-#### 1.4 Missing Documentation URLs ℹ️
+#### 1.3 Missing Documentation URLs ℹ️
 **File:** Only `reporter.py` has `documentation_url`
 
 **Issue:** Most agents don't provide `documentationUrl` or `iconUrl`.
@@ -137,188 +99,7 @@ def create_agent_card(host: str, port: int) -> AgentCard:
 
 ---
 
-## 2. Enterprise Security Standards
-
-### Current State
-- ❌ No authentication implemented on any agent endpoints
-- ❌ No HTTPS enforcement in production
-- ⚠️ Agent Cards don't declare security requirements
-- ✅ CORS middleware configured for UI access
-
-### Issues & Recommendations
-
-#### 2.1 Missing Authentication Implementation ⚠️ CRITICAL
-**File:** All agent files (`agents/*.py`)
-
-**Issue:** Agents accept unauthenticated requests.
-
-**A2A Standard:**
-> "The A2A server MUST authenticate every incoming request using the credentials provided in the HTTP headers."
-> — [Enterprise-Ready Features](https://github.com/a2aproject/A2A/blob/main/docs/topics/enterprise-ready.md)
-
-**Security Risk:** Any client can invoke agent skills without authorization.
-
-**Recommendation:**
-Implement authentication middleware:
-
-```python
-from starlette.middleware import Middleware
-from starlette.middleware.authentication import AuthenticationMiddleware
-from starlette.authentication import (
-    AuthenticationBackend, AuthenticationError, SimpleUser, AuthCredentials
-)
-
-class APIKeyAuthBackend(AuthenticationBackend):
-    async def authenticate(self, conn):
-        api_key = conn.headers.get("X-API-Key")
-        if not api_key:
-            return None
-        
-        # Validate API key against environment or database
-        expected_key = os.getenv("AGENT_API_KEY")
-        if api_key != expected_key:
-            raise AuthenticationError("Invalid API key")
-        
-        return AuthCredentials(["authenticated"]), SimpleUser("agent_client")
-
-def create_app(host='localhost', port=8080):
-    # ... existing code ...
-    
-    app.add_middleware(
-        AuthenticationMiddleware,
-        backend=APIKeyAuthBackend()
-    )
-    
-    return app
-```
-
-**Priority:** CRITICAL - Security vulnerability
-
----
-
-#### 2.2 No HTTPS Enforcement ⚠️ CRITICAL
-**File:** All agent startup scripts and `utils/server_utils.py`
-
-**Issue:** Agents run on HTTP in all environments.
-
-**A2A Standard:**
-> "All A2A communication in production environments must occur over HTTPS."
-> — [Enterprise-Ready Features](https://github.com/a2aproject/A2A/blob/main/docs/topics/enterprise-ready.md)
-
-**Recommendation:**
-1. Add TLS certificate configuration for production
-2. Enforce HTTPS in production environments
-3. Update Agent Card URLs to use HTTPS in production
-
-```python
-def run_agent_server(agent_name, host, port, create_app_func, logger, reload=False, reload_module=None):
-    # Check for production environment
-    is_production = os.getenv("ENVIRONMENT", "development") == "production"
-    
-    if is_production:
-        # Load TLS certificates
-        ssl_keyfile = os.getenv("TLS_KEY_FILE")
-        ssl_certfile = os.getenv("TLS_CERT_FILE")
-        
-        if not ssl_keyfile or not ssl_certfile:
-            logger.error("TLS certificates required in production")
-            sys.exit(1)
-        
-        uvicorn.run(
-            app,
-            host=host,
-            port=port,
-            ssl_keyfile=ssl_keyfile,
-            ssl_certfile=ssl_certfile
-        )
-    else:
-        # Development mode - HTTP is acceptable
-        uvicorn.run(app, host=host, port=port)
-```
-
-**Priority:** CRITICAL - Production security requirement
-
----
-
-#### 2.3 Missing Authorization Logic ⚠️
-**File:** All agent files (`agents/*.py`)
-
-**Issue:** No skill-based or role-based authorization.
-
-**A2A Standard:**
-> "Authorization SHOULD be applied based on the authenticated identity... Access can be controlled on a per-skill basis."
-
-**Recommendation:**
-Implement authorization decorators:
-
-```python
-def require_skill_permission(skill_id: str):
-    def decorator(func):
-        async def wrapper(self, *args, **kwargs):
-            # Check if authenticated user has permission for this skill
-            # This is simplified - implement based on your auth system
-            if not hasattr(self, 'current_user'):
-                raise Exception("Authentication required")
-            
-            if not self._has_skill_permission(self.current_user, skill_id):
-                raise Exception(f"Permission denied for skill: {skill_id}")
-            
-            return await func(self, *args, **kwargs)
-        return wrapper
-    return decorator
-
-class NewsChiefAgent(BaseAgent):
-    @require_skill_permission("newsroom.coordination.story_assignment")
-    async def _assign_story(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        # ... existing code ...
-```
-
-**Priority:** HIGH - Enterprise requirement
-
----
-
-## 3. Agent Discovery Standards
-
-### Current State
-- ✅ Agent Cards served at `/.well-known/agent-card.json`
-- ❌ No authenticated extended card support
-- ❌ No registry integration
-
-### Issues & Recommendations
-
-#### 3.1 Missing Authenticated Extended Card Support ⚠️
-**File:** All agent files (`agents/*.py`)
-
-**Issue:** Agents don't implement `agent/getAuthenticatedExtendedCard` method for sensitive information.
-
-**A2A Standard:**
-> "We recommend the use of authenticated extended agent cards for sensitive information or for serving a more detailed version of the card."
-> — [Agent Discovery](https://github.com/a2aproject/A2A/blob/main/docs/topics/agent-discovery.md)
-
-**Recommendation:**
-Implement extended card method:
-
-```python
-class NewsChiefAgentExecutor(AgentExecutor):
-    async def get_authenticated_extended_card(self, context) -> AgentCard:
-        """Return extended card with sensitive information for authenticated clients"""
-        # Verify authentication
-        if not context.is_authenticated():
-            raise Exception("Authentication required for extended card")
-        
-        # Return card with additional sensitive details
-        return create_extended_agent_card(
-            host="localhost",
-            port=8080,
-            include_internal_skills=True
-        )
-```
-
-**Priority:** MEDIUM - Security best practice
-
----
-
-## 4. Task Lifecycle & State Management
+## 1. Task Lifecycle & State Management
 
 ### Current State
 - ⚠️ Using A2A SDK's InMemoryTaskStore
@@ -327,7 +108,7 @@ class NewsChiefAgentExecutor(AgentExecutor):
 
 ### Issues & Recommendations
 
-#### 4.1 In-Memory Task Store Limitations ℹ️
+#### 1.1 In-Memory Task Store Limitations ℹ️
 **File:** All agent files (`agents/*.py`)
 
 **Issue:** Tasks are lost on agent restart. No persistence.
@@ -695,18 +476,8 @@ def create_agent_card(host: str, port: int) -> AgentCard:
 
 ## Summary of Priorities
 
-### CRITICAL (Must Fix)
-1. ⚠️ Missing security declarations in Agent Cards
-2. ⚠️ No authentication implementation
-3. ⚠️ No HTTPS enforcement for production
-
-### HIGH (Should Fix)
-4. ⚠️ Missing authorization logic
-5. ⚠️ No distributed tracing
-
 ### MEDIUM (Recommended)
 6. ⚠️ Missing protocol version declaration
-7. ⚠️ Authenticated extended card support
 8. ⚠️ Persistent task store for production
 9. ⚠️ Non-standard error responses
 10. ⚠️ Push notifications declared but not implemented
@@ -720,49 +491,3 @@ def create_agent_card(host: str, port: int) -> AgentCard:
 16. ℹ️ Version declaration consistency
 
 ---
-
-## Recommendations for Implementation
-
-### Phase 1: Security & Compliance (Week 1-2)
-- Add security declarations to all Agent Cards
-- Implement API key authentication
-- Add HTTPS configuration for production
-- Implement basic authorization
-
-### Phase 2: Enterprise Features (Week 3-4)
-- Add OpenTelemetry distributed tracing
-- Implement metrics endpoints
-- Add audit logging
-- Set up persistent task store
-
-### Phase 3: Protocol Enhancements (Week 5-6)
-- Implement authenticated extended cards
-- Either implement push notifications or disable capability
-- Add proper error handling with A2A error types
-- Implement schema validation
-
-### Phase 4: Polish & Documentation (Week 7-8)
-- Add missing documentation URLs
-- Update protocol version declarations
-- Add DataPart usage where appropriate
-- Complete documentation updates
-
----
-
-## Conclusion
-
-The elastic-newsroom project demonstrates a solid foundation with the A2A SDK but requires critical security enhancements and several protocol compliance improvements to meet enterprise A2A standards. The priority items focus on security, observability, and proper protocol implementation.
-
-**Key Strengths:**
-- Good use of A2A SDK patterns
-- Well-structured agent architecture
-- Comprehensive logging
-- Clear skill definitions
-
-**Key Gaps:**
-- Missing authentication/authorization
-- No HTTPS in production
-- Limited observability (no tracing, metrics)
-- Some protocol features declared but not implemented
-
-Following the phased approach above will bring the project into full A2A protocol compliance.

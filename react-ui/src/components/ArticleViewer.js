@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowLeft, FileText, Calendar, User, Tag } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 const ArticleViewer = ({ storyId, onBack }) => {
   const [article, setArticle] = useState(null);
@@ -183,14 +185,16 @@ const ArticleViewer = ({ storyId, onBack }) => {
           </header>
 
           {/* Article Body */}
-          <div className="prose prose-lg max-w-none">
+          <div className="prose prose-lg max-w-none prose-p:mb-6">
             {article.content ? (
-              <div 
-                className="whitespace-pre-wrap"
-                dangerouslySetInnerHTML={{ 
-                  __html: article.content.replace(/\n/g, '<br/>') 
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  p: ({node, ...props}) => <p className="mb-6" {...props} />
                 }}
-              />
+              >
+                {article.content}
+              </ReactMarkdown>
             ) : (
               <div className="text-gray-500 italic">
                 No content available for this article.
