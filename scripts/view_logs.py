@@ -16,15 +16,15 @@ from datetime import datetime
 
 # ANSI color codes matching agent colors from utils/logging.py
 COLORS = {
-    'MCP_Server': '\033[90m',       # Gray (new service)
-    'Event_Hub': '\033[97m',        # White
-    'Article_API': '\033[91m',      # Red
-    'News_Chief': '\033[95m',       # Magenta
-    'Reporter': '\033[96m',         # Cyan (powder blue)
-    'Editor': '\033[93m',           # Yellow
-    'Researcher': '\033[92m',       # Green
-    'Publisher': '\033[95m\033[1m', # Bright Magenta (pink)
-    'ARCHIVIST_CLIENT': '\033[94m', # Blue
+    'MCP_Server': '\033[30m\033[102m',  # Black text on bright green background
+    'Event_Hub': '\033[97m',            # White
+    'Article_API': '\033[91m',          # Red
+    'News_Chief': '\033[95m',           # Magenta
+    'Reporter': '\033[96m',             # Cyan (powder blue)
+    'Editor': '\033[93m',               # Yellow
+    'Researcher': '\033[92m',           # Green
+    'Publisher': '\033[95m\033[1m',     # Bright Magenta (pink)
+    'ARCHIVIST_CLIENT': '\033[94m',     # Blue
 }
 
 RESET = '\033[0m'

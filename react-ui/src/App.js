@@ -144,19 +144,20 @@ function App() {
     try {
       // Clear all agent states
       await newsroomService.clearAllAgents();
-      
+
       // Clear local state
       setCurrentStory(null);
       setError(null);
       setStoryRestored(false);
       setWorkflowStarting(false);
-      
+      setArticleHeadline(null);
+
       // Reset workflow progress
       resetWorkflowProgress();
-      
+
       // Clear localStorage
       localStorage.removeItem('currentStory');
-      
+
       console.log('✅ All agents cleared and reset to idle state');
     } catch (error) {
       console.error('Error clearing agents:', error);
@@ -216,9 +217,9 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           {/* Left Column - Form and Progress */}
           <div className="space-y-6">
-            <WorkflowForm 
+            <WorkflowForm
               onSubmit={handleStartWorkflow}
-              isLoading={isLoading || !!currentStory}
+              isLoading={isLoading}
             />
             
             <WorkflowProgress 

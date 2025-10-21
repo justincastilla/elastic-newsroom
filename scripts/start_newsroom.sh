@@ -24,16 +24,31 @@ NC='\033[0m' # No Color
 LOG_DIR="logs"
 PID_FILE=".newsroom_pids"
 
+# Port configuration (centralized)
+PORT_MCP_SERVER=8095
+PORT_EVENT_HUB=8090
+PORT_ARTICLE_API=8085
+PORT_NEWS_CHIEF=8080
+PORT_REPORTER=8081
+PORT_EDITOR=8082
+PORT_RESEARCHER=8083
+PORT_PUBLISHER=8084
+PORT_UI_MESOP=3000
+PORT_UI_REACT=3001
+
+# All ports array (for iteration in loops)
+ALL_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER $PORT_UI_MESOP $PORT_UI_REACT)
+
 # Agent configurations: name:port:module
 AGENTS=(
-    "MCP Server:8095:mcp_servers.newsroom_http_server:app"
-    "Event Hub:8090:services.event_hub:app"
-    "Article API:8085:services.article_api:app"
-    "News Chief:8080:agents.news_chief:app"
-    "Reporter:8081:agents.reporter:app"
-    "Editor:8082:agents.editor:app"
-    "Researcher:8083:agents.researcher:app"
-    "Publisher:8084:agents.publisher:app"
+    "MCP Server:${PORT_MCP_SERVER}:mcp_servers.newsroom_http_server:app"
+    "Event Hub:${PORT_EVENT_HUB}:services.event_hub:app"
+    "Article API:${PORT_ARTICLE_API}:services.article_api:app"
+    "News Chief:${PORT_NEWS_CHIEF}:agents.news_chief:app"
+    "Reporter:${PORT_REPORTER}:agents.reporter:app"
+    "Editor:${PORT_EDITOR}:agents.editor:app"
+    "Researcher:${PORT_RESEARCHER}:agents.researcher:app"
+    "Publisher:${PORT_PUBLISHER}:agents.publisher:app"
 )
 
 # Parse command line arguments
@@ -88,7 +103,7 @@ if [ "$1" == "--stop" ]; then
 
     # Force kill any processes still bound to the ports (including MCP Server, Event Hub, Article API and UI ports)
     echo -e "${YELLOW}   Force killing any remaining processes on ports...${NC}"
-    for port in 8080 8081 8082 8083 8084 8085 8090 8095 3000 3001; do
+    for port in "${ALL_PORTS[@]}"; do
         PIDS=$(lsof -ti:$port 2>/dev/null || true)
         if [ -n "$PIDS" ]; then
             for PID in $PIDS; do
@@ -103,7 +118,7 @@ if [ "$1" == "--stop" ]; then
 
     # Final verification - check if any ports are still in use
     STILL_IN_USE=""
-    for port in 8080 8081 8082 8083 8084 8085 8090 8095 3000 3001; do
+    for port in "${ALL_PORTS[@]}"; do
         if lsof -ti:$port > /dev/null 2>&1; then
             STILL_IN_USE="$STILL_IN_USE $port"
         fi
@@ -125,7 +140,9 @@ mkdir -p "$LOG_DIR"
 # Check if any ports are already in use
 echo -e "${BLUE}🔍 Checking for port conflicts...${NC}"
 PORTS_IN_USE=""
-for port in 8080 8081 8082 8083 8084 8085 8090 8095; do
+# Check agent ports only (exclude UI ports for this check)
+AGENT_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER)
+for port in "${AGENT_PORTS[@]}"; do
     if lsof -ti:$port > /dev/null 2>&1; then
         PORTS_IN_USE="$PORTS_IN_USE $port"
     fi

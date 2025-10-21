@@ -7,11 +7,17 @@ This imports the actual tool implementations and wraps them in REST endpoints.
 
 import json
 from typing import Dict, Any, List
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 # Import the MCP module to access the underlying tool functions
 import mcp_servers.newsroom_tools as newsroom_tools
+
+# Import logging utilities
+from utils import setup_logger
+
+# Setup logger for MCP server
+logger = setup_logger("MCP_SERVER", log_file="logs/MCP_Server.log")
 
 app = FastAPI(title="Newsroom MCP HTTP Server")
 
@@ -29,11 +35,27 @@ class ToolCallResponse(BaseModel):
     content: List[Dict[str, str]]
 
 
+def get_tool_function(tool):
+    """
+    Extract the underlying function from a FastMCP tool decorator.
+
+    FastMCP wraps functions in a FunctionTool object with a 'fn' attribute.
+    This helper unwraps it to get the actual callable function.
+
+    Args:
+        tool: The tool object (either a FunctionTool wrapper or raw function)
+
+    Returns:
+        The underlying callable function
+    """
+    return tool.fn if hasattr(tool, 'fn') else tool
+
+
 # Tool registry with metadata
 # Access the underlying function from FastMCP's FunctionTool wrapper
 TOOLS = {
     "research_questions": {
-        "function": newsroom_tools.research_questions.fn if hasattr(newsroom_tools.research_questions, 'fn') else newsroom_tools.research_questions,
+        "function": get_tool_function(newsroom_tools.research_questions),
         "name": "research_questions",
         "description": "Research multiple questions and return structured data with facts, figures, and sources.",
         "inputSchema": {
@@ -53,7 +75,7 @@ TOOLS = {
         }
     },
     "generate_outline": {
-        "function": newsroom_tools.generate_outline.fn if hasattr(newsroom_tools.generate_outline, 'fn') else newsroom_tools.generate_outline,
+        "function": get_tool_function(newsroom_tools.generate_outline),
         "name": "generate_outline",
         "description": "Generate article outline and identify 3-5 research questions that would strengthen the piece.",
         "inputSchema": {
@@ -67,7 +89,7 @@ TOOLS = {
         }
     },
     "generate_article": {
-        "function": newsroom_tools.generate_article.fn if hasattr(newsroom_tools.generate_article, 'fn') else newsroom_tools.generate_article,
+        "function": get_tool_function(newsroom_tools.generate_article),
         "name": "generate_article",
         "description": "Generate article content based on topic, research, and archive context.",
         "inputSchema": {
@@ -84,7 +106,7 @@ TOOLS = {
         }
     },
     "review_article": {
-        "function": newsroom_tools.review_article.fn if hasattr(newsroom_tools.review_article, 'fn') else newsroom_tools.review_article,
+        "function": get_tool_function(newsroom_tools.review_article),
         "name": "review_article",
         "description": "Review article draft for grammar, tone, consistency, and length.",
         "inputSchema": {
@@ -99,7 +121,7 @@ TOOLS = {
         }
     },
     "apply_edits": {
-        "function": newsroom_tools.apply_edits.fn if hasattr(newsroom_tools.apply_edits, 'fn') else newsroom_tools.apply_edits,
+        "function": get_tool_function(newsroom_tools.apply_edits),
         "name": "apply_edits",
         "description": "Apply editorial suggestions to article content.",
         "inputSchema": {
@@ -112,7 +134,7 @@ TOOLS = {
         }
     },
     "generate_tags": {
-        "function": newsroom_tools.generate_tags.fn if hasattr(newsroom_tools.generate_tags, 'fn') else newsroom_tools.generate_tags,
+        "function": get_tool_function(newsroom_tools.generate_tags),
         "name": "generate_tags",
         "description": "Generate tags and categories for an article.",
         "inputSchema": {
@@ -126,7 +148,7 @@ TOOLS = {
         }
     },
     "deploy_to_production": {
-        "function": newsroom_tools.deploy_to_production.fn if hasattr(newsroom_tools.deploy_to_production, 'fn') else newsroom_tools.deploy_to_production,
+        "function": get_tool_function(newsroom_tools.deploy_to_production),
         "name": "deploy_to_production",
         "description": "Deploy article to production via CI/CD pipeline simulation.",
         "inputSchema": {
@@ -140,7 +162,7 @@ TOOLS = {
         }
     },
     "notify_subscribers": {
-        "function": newsroom_tools.notify_subscribers.fn if hasattr(newsroom_tools.notify_subscribers, 'fn') else newsroom_tools.notify_subscribers,
+        "function": get_tool_function(newsroom_tools.notify_subscribers),
         "name": "notify_subscribers",
         "description": "Notify subscribers about new article via CRM system simulation.",
         "inputSchema": {
@@ -177,12 +199,19 @@ async def list_tools():
 
 
 @app.post("/mcp/v1/tools/call", response_model=ToolCallResponse)
-async def call_tool(request: ToolCallRequest):
+async def call_tool(request: ToolCallRequest, http_request: Request):
     """Call an MCP tool with the provided arguments"""
     tool_name = request.name
     arguments = request.arguments
 
+    # Get calling agent from header
+    calling_agent = http_request.headers.get("X-Calling-Agent", "UNKNOWN")
+
+    # Log the tool call with custom format [AGENT → MCP]
+    logger.info(f"[{calling_agent} → MCP] Calling tool: {tool_name}")
+
     if tool_name not in TOOLS:
+        logger.error(f"[{calling_agent} → MCP] ❌ Tool not found: {tool_name}")
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found")
 
     tool = TOOLS[tool_name]
@@ -191,6 +220,8 @@ async def call_tool(request: ToolCallRequest):
     try:
         # Call the tool function with unpacked arguments
         result = tool_function(**arguments)
+
+        logger.info(f"[{calling_agent} → MCP] ✅ Tool {tool_name} completed")
 
         # Return in MCP format
         return {
@@ -203,21 +234,17 @@ async def call_tool(request: ToolCallRequest):
         }
     except TypeError as e:
         # Log the actual arguments that caused the error
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"TypeError in tool '{tool_name}': {str(e)}")
-        logger.error(f"Arguments received: {json.dumps(arguments, indent=2)}")
-        logger.error(f"Tool schema: {json.dumps(tool['inputSchema'], indent=2)}")
+        logger.error(f"[{calling_agent} → MCP] ❌ TypeError in tool '{tool_name}': {str(e)}")
+        logger.error(f"[{calling_agent} → MCP]    Arguments received: {json.dumps(arguments, indent=2)}")
+        logger.error(f"[{calling_agent} → MCP]    Tool schema: {json.dumps(tool['inputSchema'], indent=2)}")
 
         raise HTTPException(
             status_code=400,
             detail=f"Invalid arguments for tool '{tool_name}': {str(e)}. Arguments: {json.dumps(arguments)}"
         )
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"Exception in tool '{tool_name}': {str(e)}")
-        logger.error(f"Arguments received: {json.dumps(arguments, indent=2)}")
+        logger.error(f"[{calling_agent} → MCP] ❌ Exception in tool '{tool_name}': {str(e)}")
+        logger.error(f"[{calling_agent} → MCP]    Arguments received: {json.dumps(arguments, indent=2)}")
 
         raise HTTPException(
             status_code=500,

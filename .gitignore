@@ -1,3 +1,4 @@
+.DS_Store
 articles/*.md
 newsroom.log
 reporter.log

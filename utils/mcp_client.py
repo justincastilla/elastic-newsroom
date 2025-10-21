@@ -18,7 +18,7 @@ from anthropic import Anthropic
 class MCPClient:
     """Client for interacting with MCP servers"""
 
-    def __init__(self, mcp_server_url: str, anthropic_client: Optional[Anthropic] = None, logger=None):
+    def __init__(self, mcp_server_url: str, anthropic_client: Optional[Anthropic] = None, logger=None, agent_name: Optional[str] = None):
         """
         Initialize MCP client.
 
@@ -26,10 +26,12 @@ class MCPClient:
             mcp_server_url: URL of the MCP server (e.g., http://localhost:8095)
             anthropic_client: Optional Anthropic client for tool selection
             logger: Optional logger instance
+            agent_name: Optional name of the agent using this client (for logging)
         """
         self.mcp_server_url = mcp_server_url.rstrip("/")
         self.anthropic_client = anthropic_client
         self.logger = logger
+        self.agent_name = agent_name or "UNKNOWN"
 
         # Tool cache
         self._tools_cache: Optional[List[Dict[str, Any]]] = None
@@ -106,6 +108,9 @@ class MCPClient:
                     json={
                         "name": tool_name,
                         "arguments": arguments
+                    },
+                    headers={
+                        "X-Calling-Agent": self.agent_name
                     }
                 )
                 response.raise_for_status()
@@ -235,13 +240,14 @@ Provide ONLY the JSON object, no additional text."""
             raise Exception(f"Failed to select and call tool: {e}")
 
 
-def create_mcp_client(logger=None, anthropic_client: Optional[Anthropic] = None) -> MCPClient:
+def create_mcp_client(logger=None, anthropic_client: Optional[Anthropic] = None, agent_name: Optional[str] = None) -> MCPClient:
     """
     Create MCP client with configuration from environment.
 
     Args:
         logger: Optional logger instance
         anthropic_client: Optional Anthropic client for tool selection
+        agent_name: Optional name of the agent using this client (for logging)
 
     Returns:
         MCPClient instance
@@ -251,5 +257,6 @@ def create_mcp_client(logger=None, anthropic_client: Optional[Anthropic] = None)
     return MCPClient(
         mcp_server_url=mcp_server_url,
         anthropic_client=anthropic_client,
-        logger=logger
+        logger=logger,
+        agent_name=agent_name
     )

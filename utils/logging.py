@@ -26,6 +26,7 @@ class AgentColors:
     ARCHIVIST_CLIENT = '\033[94m'  # Blue
     EVENT_HUB = '\033[97m'       # White
     ARTICLE_API = '\033[91m'     # Red
+    MCP_SERVER = '\033[30m\033[102m'  # Black text on bright green background
     UI = '\033[90m'              # Gray
 
     # Fallback for unknown agents
@@ -42,6 +43,7 @@ AGENT_COLOR_MAP = {
     'ARCHIVIST_CLIENT': AgentColors.ARCHIVIST_CLIENT,
     'EVENT_HUB': AgentColors.EVENT_HUB,
     'ARTICLE_API': AgentColors.ARTICLE_API,
+    'MCP_SERVER': AgentColors.MCP_SERVER,
     'UI': AgentColors.UI,
 }
 
@@ -70,7 +72,8 @@ def setup_logger(
     name: str,
     log_file: str = "logs/newsroom.log",
     level: int = logging.INFO,
-    console: bool = False
+    console: bool = True,
+    console_colors: bool = False
 ) -> logging.Logger:
     """
     Set up a logger for an agent or component.
@@ -79,15 +82,21 @@ def setup_logger(
         name: Name of the logger (e.g., "NEWS_CHIEF", "REPORTER", "UI")
         log_file: Path to log file (default: "logs/newsroom.log")
         level: Logging level (default: logging.INFO)
-        console: Whether to also log to console (default: False)
+        console: Whether to also log to console (default: True)
+        console_colors: Whether to use colors in console output (default: False)
+                       Set to True only when running agents directly for debugging.
+                       Set to False when running via start_newsroom.sh (avoids ANSI codes in log files)
 
     Returns:
         Configured logger instance
 
     Example:
         >>> from utils import setup_logger
-        >>> logger = setup_logger("NEWS_CHIEF")
+        >>> logger = setup_logger("NEWS_CHIEF")  # Plain console output
         >>> logger.info("Story assigned successfully")
+        >>>
+        >>> # For debugging with colors
+        >>> logger = setup_logger("NEWS_CHIEF", console_colors=True)
     """
     # Create logger with the specified name
     logger = logging.getLogger(name)
@@ -103,12 +112,19 @@ def setup_logger(
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # Console formatter (with colors)
-    console_formatter = ColoredFormatter(
-        f'[{name}] %(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        agent_name=name
-    )
+    # Console formatter - use colored or plain depending on console_colors flag
+    if console_colors:
+        console_formatter = ColoredFormatter(
+            f'[{name}] %(asctime)s %(levelname)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            agent_name=name
+        )
+    else:
+        # Plain formatter (no colors) - same as file formatter
+        console_formatter = logging.Formatter(
+            f'[{name}] %(asctime)s %(levelname)s: %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
 
     # File handler
     log_path = Path(log_file)
@@ -118,10 +134,10 @@ def setup_logger(
     file_handler.setLevel(level)
     logger.addHandler(file_handler)
 
-    # Optional console handler
+    # Console handler (enabled by default)
     if console:
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(console_formatter)  # Use colored formatter
+        console_handler.setFormatter(console_formatter)
         console_handler.setLevel(level)
         logger.addHandler(console_handler)
 

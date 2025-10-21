@@ -197,9 +197,13 @@ class BaseAgent:
                 if self.anthropic_client is None:
                     self._init_anthropic_client()
 
+                # Extract agent name from logger
+                agent_name = self.logger.name if hasattr(self.logger, 'name') else "UNKNOWN"
+
                 self.mcp_client = create_mcp_client(
                     logger=self.logger,
-                    anthropic_client=self.anthropic_client
+                    anthropic_client=self.anthropic_client,
+                    agent_name=agent_name
                 )
                 self.logger.info("✅ MCP client initialized")
             except Exception as e:

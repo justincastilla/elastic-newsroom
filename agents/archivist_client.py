@@ -16,6 +16,41 @@ from utils import setup_logger, truncate_text
 logger = setup_logger("ARCHIVIST_CLIENT")
 
 
+# Query configuration
+ARCHIVE_INDEX = "news_archive"
+NO_RESULTS_MESSAGE = "No results found"
+
+
+def prepare_search_query(query: str, index: str = ARCHIVE_INDEX, format_type: str = "summary") -> str:
+    """
+    Prepare a search query for the Archivist with consistent formatting.
+
+    Args:
+        query: The search topic/query
+        index: The Elasticsearch index to search (default: news_archive)
+        format_type: Type of response format:
+            - "summary": Return results as a summary (for /converse endpoint)
+            - "string": Return results as a single string (for A2A JSONRPC)
+
+    Returns:
+        Formatted query string ready to send to Archivist
+    """
+    if format_type == "summary":
+        return (
+            f"Search the '{index}' index for articles about: {query}. "
+            f"Return relevant results as a summary. "
+            f"If no results found, say '{NO_RESULTS_MESSAGE}'."
+        )
+    elif format_type == "string":
+        return (
+            f"Run a search in the '{index}' index about this topic: {query}. "
+            f"Return the results as a single string. "
+            f"If there are no results, then simply return the phrase '{NO_RESULTS_MESSAGE}'."
+        )
+    else:
+        raise ValueError(f"Unknown format_type: {format_type}. Use 'summary' or 'string'.")
+
+
 async def converse(
     query: str,
     story_id: str,
@@ -63,8 +98,8 @@ async def converse(
     logger.info(f"   Story ID: {story_id}")
     logger.info(f"   Agent ID: {agent_id}")
 
-    # Prepare the search query
-    prepared_query = f"Search the 'news_archive' index for articles about: {query}. Return relevant results as a summary. If no results found, say 'No results found'."
+    # Prepare the search query using helper function
+    prepared_query = prepare_search_query(query, format_type="summary")
 
     # Build /converse request (simpler format)
     converse_request = {
@@ -229,8 +264,8 @@ async def send_task(
     timestamp_ms = int(time.time() * 1000)
     message_id = f"msg-{timestamp_ms}-{story_id.replace('_', '')[:8]}"
 
-    # Prepare the search query
-    prepared_query = f"Run a search in the 'news_archive' index about this topic: {query}. Return the results as a single string. If there are no results, then simply return the phrase 'No results found'."
+    # Prepare the search query using helper function
+    prepared_query = prepare_search_query(query, format_type="string")
 
     # Build A2A JSONRPC request
     a2a_request = {
