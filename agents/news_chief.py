@@ -21,7 +21,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import create_text_message_object
-from utils import setup_logger, run_agent_server
+from utils import setup_logger, run_agent_server, format_json_for_log
 from agents.base_agent import BaseAgent
 
 # Configure logging using centralized utility
@@ -55,7 +55,7 @@ class NewsChiefAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"') and not query.startswith('{"action": "get_story_status"') and not query.startswith('{"action": "list_active_stories"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "assign_story", "story": {"topic": query}}

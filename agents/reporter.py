@@ -22,9 +22,9 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import create_text_message_object
-from utils import setup_logger, load_env_config, run_agent_server
+from utils import setup_logger, load_env_config, run_agent_server, format_json_for_log, truncate_text
 from agents.base_agent import BaseAgent
-from agents.archivist_client import call_archivist
+from agents.archivist_client import converse, send_task
 
 # Load environment variables
 load_env_config()
@@ -64,6 +64,9 @@ class ReporterAgent(BaseAgent):
         if not self.anthropic_client:
             logger.warning("Will use mock article generation")
 
+        # Initialize MCP client for tool calling
+        self._init_mcp_client()
+
     # Note: Helper methods (_error_response, _success_response, _create_a2a_client,
     # _parse_a2a_response, _strip_json_codeblocks, _call_anthropic) are now
     # inherited from BaseAgent
@@ -81,7 +84,7 @@ class ReporterAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -243,7 +246,10 @@ class ReporterAgent(BaseAgent):
                     logger.error(f"❌ Researcher failed: {research_response}")
                 elif research_response.get("status") == "success":
                     research_results = research_response.get("research_results", [])
-                    self.research_data[story_id] = research_results
+                    self.research_data[story_id] = {
+                        "questions": research_questions,
+                        "results": research_results
+                    }
                     logger.info(f"✅ Received research data: {len(research_results)} answers")
                 else:
                     logger.warning(f"⚠️  Research request failed: {research_response.get('message')}")
@@ -256,7 +262,9 @@ class ReporterAgent(BaseAgent):
                     raise Exception(f"Archivist failed - this is a REQUIRED component: {archive_response}")
                 elif archive_response.get("status") == "success":
                     archive_results = archive_response.get("articles", [])
-                    self.archive_data[story_id] = archive_results
+                    self.archive_data[story_id] = {
+                        "results": archive_results
+                    }
                     logger.info(f"✅ Received archive data: {len(archive_results)} historical articles")
                     self.archivist_status[story_id] = "completed"
 
@@ -376,46 +384,36 @@ class ReporterAgent(BaseAgent):
             }
 
     async def _generate_outline_and_questions(self, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate article outline and identify research questions"""
+        """Generate article outline and identify research questions using MCP generate_outline tool"""
         topic = assignment.get("topic", "Unknown Topic")
         angle = assignment.get("angle", "")
         target_length = assignment.get("target_length", 1000)
 
-        prompt = f"""You are a professional journalist for Elastic News planning an article.
+        try:
+            logger.info(f"🔧 Calling MCP generate_outline tool...")
 
-Topic: {topic}
-Angle: {angle if angle else "General overview"}
-Target Length: {target_length} words
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-Create a brief outline for this article and identify 3-5 research questions that would strengthen the piece with factual data, statistics, or expert insights.
+            result = await self.mcp_client.call_tool(
+                tool_name="generate_outline",
+                arguments={
+                    "topic": topic,
+                    "angle": angle,
+                    "target_length": target_length
+                }
+            )
 
-Provide your response in JSON format:
-{{
-  "outline": "Brief 3-4 point outline of the article structure",
-  "research_questions": [
-    "What percentage of companies/organizations are adopting this technology?",
-    "What are the key statistics or market data related to this topic?",
-    "Who are the leading companies or experts in this space?",
-    "What recent developments or trends are worth highlighting?"
-  ]
-}}
+            # Parse the JSON response
+            outline_data = json.loads(result) if isinstance(result, str) else result
+            logger.info(f"✅ Outline generated with {len(outline_data.get('research_questions', []))} research questions")
+            return outline_data
 
-Limit to 3-5 focused research questions. Provide only the JSON, no additional text."""
-
-        default_response = {
-            "outline": "Introduction, Background, Current State, Future Outlook",
-            "research_questions": []
-        }
-
-        response_text = await self._call_anthropic(prompt, max_tokens=1500, fallback=lambda: None)
-        if response_text:
-            try:
-                response_text = self._strip_json_codeblocks(response_text)
-                return json.loads(response_text)
-            except Exception as e:
-                logger.error(f"Error parsing outline JSON: {e}", exc_info=True)
-                return default_response
-        return default_response
+        except Exception as e:
+            logger.error(f"❌ MCP generate_outline tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP generate_outline tool failed: {e}")
 
     async def _send_to_researcher(self, story_id: str, assignment: Dict[str, Any], questions: List[str]) -> Dict[str, Any]:
         """Send research questions to Researcher agent via A2A"""
@@ -474,13 +472,13 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
         logger.info(f"🔍 Calling Archivist via archivist_client module")
         logger.info(f"   Search query: '{search_query}'")
 
-        # Call the archivist client (prefers direct agent URL)
+        # Call the archivist client using converse() endpoint (simpler, recommended)
+        # Alternative: use send_task() for A2A JSONRPC protocol
         try:
-            result = await call_archivist(
+            result = await converse(
                 query=search_query,
                 story_id=story_id,
-                agent_url=self.archivist_agent_url,  # Direct endpoint (preferred)
-                agent_card_url=self.archivist_card_url,  # Fallback to agent card URL
+                agent_url=self.archivist_agent_url,  # Direct endpoint
                 api_key=self.archivist_api_key,
                 max_retries=10
             )
@@ -490,83 +488,48 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
             raise
 
     async def _generate_article(self, assignment: Dict[str, Any], outline: str = "", research_results: Optional[List[Dict[str, Any]]] = None, archive_results: Optional[List[Dict[str, Any]]] = None) -> str:
-        """Generate article content using Anthropic Claude with research data"""
+        """Generate article content using MCP generate_article tool"""
         topic = assignment.get("topic", "Unknown Topic")
         angle = assignment.get("angle", "")
         target_length = assignment.get("target_length", 1000)
-        priority = assignment.get("priority", "normal")
 
-        # Build research context
-        research_context = ""
-        if research_results:
-            research_context = "\n\nRESEARCH DATA (integrate this factual information into your article):\n"
-            for i, result in enumerate(research_results, 1):
-                research_context += f"\nQuestion {i}: {result.get('question')}\n"
-                research_context += f"Summary: {result.get('summary', 'N/A')}\n"
-                research_context += "Facts:\n"
-                for fact in result.get('facts', []):
-                    research_context += f"  - {fact}\n"
+        # Convert research results to string for MCP tool
+        research_data = json.dumps(research_results) if research_results else ""
 
-                figures = result.get('figures', {})
-                if any(figures.values()):
-                    research_context += "Key Figures:\n"
-                    if figures.get('percentages'):
-                        research_context += f"  Percentages: {', '.join(figures['percentages'])}\n"
-                    if figures.get('dollar_amounts'):
-                        research_context += f"  Dollar Amounts: {', '.join(figures['dollar_amounts'])}\n"
-                    if figures.get('companies'):
-                        research_context += f"  Companies: {', '.join(figures['companies'])}\n"
-
-        # Build archive context
+        # Convert archive results to string for MCP tool
         archive_context = ""
         if archive_results:
-            # archive_results could be a list of articles or a text response
             if isinstance(archive_results, list) and len(archive_results) > 0:
-                archive_context = "\n\nHISTORICAL COVERAGE (reference for context, avoid repeating these angles):\n"
-                for i, article in enumerate(archive_results[:5], 1):  # Limit to 5 articles
-                    archive_context += f"\n{i}. {article}\n"
+                archive_context = "\n".join([f"{i}. {article}" for i, article in enumerate(archive_results[:5], 1)])
             elif isinstance(archive_results, str):
-                archive_context = f"\n\nHISTORICAL COVERAGE:\n{archive_results}\n"
+                archive_context = archive_results
 
-        # Build prompt
-        prompt = f"""You are a professional journalist for Elastic News, a technology news publication.
+        try:
+            logger.info(f"🔧 Calling MCP generate_article tool...")
 
-Write a news article with the following specifications:
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-Topic: {topic}
-{f"Angle/Focus: {angle}" if angle else ""}
-Target Length: approximately {target_length} words
-Priority: {priority}
-{f"Outline: {outline}" if outline else ""}
-{research_context}
-{archive_context}
+            result = await self.mcp_client.call_tool(
+                tool_name="generate_article",
+                arguments={
+                    "topic": topic,
+                    "angle": angle,
+                    "target_length": target_length,
+                    "outline": outline,
+                    "research_data": research_data,
+                    "archive_context": archive_context
+                }
+            )
 
-Write a well-structured news article with:
-- A compelling headline
-- A clear and engaging introduction (lede paragraph)
-- 2-3 body paragraphs with supporting details and context
-- Integrate the research data naturally into the article
-- Use specific statistics, percentages, and company names from the research
-- If historical coverage is provided, reference it for context but take a fresh angle
-- A brief conclusion
+            logger.info(f"✅ Article generated: {len(str(result).split())} words")
+            return result
 
-Style Guidelines:
-- Professional and informative tone
-- Balanced and objective reporting
-- Clear and concise language
-- Focus on facts and insights
-- Cite data points naturally (e.g., "According to recent industry data, 65% of...")
-- Avoid repeating angles from historical coverage - bring a new perspective
-
-Format your response as:
-HEADLINE: [Your headline here]
-
-[Article body paragraphs]"""
-
-        # Use Anthropic helper with fallback to mock
-        fallback = lambda: self._generate_mock_article(topic, angle, target_length)
-        result = await self._call_anthropic(prompt, max_tokens=2000, fallback=fallback)
-        return result if result else fallback()
+        except Exception as e:
+            logger.error(f"❌ MCP generate_article tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP generate_article tool failed: {e}")
 
     def _generate_mock_article(self, topic: str, angle: str, target_length: int) -> str:
         """Generate a simple mock article when Anthropic API is not available"""
@@ -675,13 +638,13 @@ Further updates will be provided as more information becomes available. Stakehol
             logger.info(f"✅ Draft updated successfully")
             logger.info(f"   Word count: {old_word_count} → {draft['word_count']}")
 
-            # Submit revised draft back to News Chief for workflow management
-            logger.info("📤 Submitting revised draft to News Chief...")
-            news_chief_response = await self._submit_draft_to_news_chief(story_id, draft)
+            # Send finalized article to Publisher (Step 17 in workflow)
+            logger.info("📤 Sending article to Publisher...")
+            publisher_response = await self._send_to_publisher(story_id, draft)
 
             response = {
                 "status": "success",
-                "message": "Editorial suggestions applied successfully",
+                "message": "Editorial suggestions applied and article published",
                 "story_id": story_id,
                 "old_word_count": old_word_count,
                 "new_word_count": draft["word_count"],
@@ -689,13 +652,13 @@ Further updates will be provided as more information becomes available. Stakehol
                 "preview": revised_content[:200] + "..." if len(revised_content) > 200 else revised_content
             }
 
-            # Include News Chief response
-            if news_chief_response.get("status") == "success":
-                response["news_chief_response"] = news_chief_response
-                logger.info(f"✅ Revised draft submitted to News Chief successfully")
+            # Include Publisher response
+            if publisher_response.get("status") == "success":
+                response["publisher_response"] = publisher_response
+                logger.info(f"✅ Article published successfully")
             else:
-                response["news_chief_error"] = news_chief_response.get("message")
-                logger.warning(f"⚠️  News Chief submission failed: {news_chief_response.get('message')}")
+                response["publisher_error"] = publisher_response.get("message")
+                logger.warning(f"⚠️  Publishing failed: {publisher_response.get('message')}")
 
             return response
 
@@ -703,39 +666,92 @@ Further updates will be provided as more information becomes available. Stakehol
             logger.error(f"❌ Error applying edits: {e}", exc_info=True)
             return self._error_response(f"Failed to apply edits: {str(e)}", story_id=story_id)
 
+    async def _send_to_publisher(self, story_id: str, draft: Dict[str, Any]) -> Dict[str, Any]:
+        """Send finalized article to Publisher for indexing and storage"""
+        try:
+            logger.info("📰 Preparing article for publication...")
+
+            assignment = draft.get("assignment", {})
+
+            # Build article data for Publisher
+            article_data = {
+                "story_id": story_id,
+                "headline": draft.get("headline", assignment.get("topic")),
+                "content": draft.get("content"),
+                "topic": assignment.get("topic"),
+                "angle": assignment.get("angle"),
+                "word_count": draft.get("word_count"),
+                "target_length": assignment.get("target_length"),
+                "priority": assignment.get("priority", "normal"),
+                "created_at": assignment.get("created_at"),
+                "published_at": datetime.now().isoformat(),
+                "author": "Reporter Agent",
+                "editor": "Editor Agent",
+                "research_questions": self.research_data.get(story_id, {}).get("questions", []),
+                "research_data": self.research_data.get(story_id, {}).get("results", []),
+                "editorial_review": self.editor_reviews.get(story_id),
+                "archive_references": self.archive_data.get(story_id, {}).get("results", []),
+                "version": 1,
+                "revisions_count": draft.get("revisions_applied", 0),
+                "agents_involved": ["News Chief", "Reporter", "Researcher", "Archivist", "Editor", "Publisher"]
+            }
+
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                # Create A2A client for Publisher
+                publisher_client, _ = await self._create_a2a_client(
+                    http_client,
+                    self.publisher_url,
+                    "Publisher"
+                )
+
+                # Send publish request
+                request = {
+                    "action": "publish_article",
+                    "article": article_data
+                }
+
+                message = create_text_message_object(content=json.dumps(request))
+                logger.info("📤 Sending article to Publisher...")
+
+                result = await self._parse_a2a_response(publisher_client, message)
+
+                if result:
+                    logger.info(f"✅ Publisher response received")
+                    logger.info(f"   Status: {result.get('status')}")
+                    return result
+
+                return self._error_response("No response from Publisher")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send to Publisher: {e}", exc_info=True)
+            return self._error_response(f"Failed to contact Publisher: {str(e)}")
+
     async def _integrate_edits(self, original_content: str, review: Dict[str, Any]) -> str:
-        """Integrate editorial suggestions into the article using Anthropic"""
+        """Integrate editorial suggestions into the article using MCP apply_edits tool"""
         suggested_edits = review.get("suggested_edits", [])
-        overall_assessment = review.get("overall_assessment", "")
-        editor_notes = review.get("editor_notes", "")
 
-        # Build prompt for applying edits
-        prompt = f"""You are a reporter for Elastic News revising your article based on editorial feedback.
+        try:
+            logger.info(f"🔧 Calling MCP apply_edits tool...")
 
-ORIGINAL ARTICLE:
-{original_content}
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-EDITORIAL REVIEW:
-{overall_assessment}
+            result = await self.mcp_client.call_tool(
+                tool_name="apply_edits",
+                arguments={
+                    "original_content": original_content,
+                    "suggested_edits": json.dumps(suggested_edits)
+                }
+            )
 
-SUGGESTED EDITS:
-{json.dumps(suggested_edits, indent=2)}
+            logger.info(f"✅ Edits applied: {len(str(result).split())} words")
+            return result
 
-EDITOR'S NOTES:
-{editor_notes}
-
-Please revise the article by applying ALL the suggested edits. Make sure to:
-1. Fix all grammar, spelling, and punctuation issues
-2. Adjust tone where needed to maintain professionalism
-3. Ensure consistency in terminology and style
-4. Adjust length if needed to meet target requirements
-
-Provide ONLY the revised article text, maintaining the same format (headline followed by body). Do not include any explanations or notes."""
-
-        # Use Anthropic helper with fallback to simple edits
-        fallback = lambda: self._apply_simple_edits(original_content, suggested_edits)
-        result = await self._call_anthropic(prompt, max_tokens=3000, fallback=fallback)
-        return result if result else fallback()
+        except Exception as e:
+            logger.error(f"❌ MCP apply_edits tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP apply_edits tool failed: {e}")
 
     def _apply_simple_edits(self, content: str, suggested_edits: List[Dict[str, Any]]) -> str:
         """Apply simple text replacements when Anthropic is not available"""

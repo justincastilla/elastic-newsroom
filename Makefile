@@ -1,4 +1,4 @@
-.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose install clean start stop
+.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose install clean start start-logs stop logs logs-color
 
 # Default target
 help:
@@ -19,12 +19,14 @@ help:
 	@echo "Development:"
 	@echo "  make install           - Install dependencies"
 	@echo "  make start             - Start all agents"
+	@echo "  make start-logs        - Start agents + UI + show colorized logs"
 	@echo "  make start-ui          - Start agents + React UI"
 	@echo "  make stop              - Stop all agents"
 	@echo "  make clean             - Clean up generated files"
 	@echo ""
 	@echo "Agent Management:"
-	@echo "  make logs              - View all agent logs"
+	@echo "  make logs              - View all agent logs (plain)"
+	@echo "  make logs-color        - View colorized agent logs (recommended)"
 	@echo "  make status            - Check agent health"
 
 # Testing targets
@@ -72,6 +74,13 @@ start:
 	@echo "🚀 Starting all agents..."
 	./scripts/start_newsroom.sh --reload
 
+start-logs:
+	@echo "🚀 Starting all agents + UI with colorized logs..."
+	@./scripts/start_newsroom.sh --with-ui --reload
+	@sleep 3
+	@echo ""
+	@python scripts/view_logs.py
+
 start-ui:
 	@echo "🚀 Starting agents + React UI..."
 	./scripts/start_newsroom.sh --with-ui --reload
@@ -93,6 +102,9 @@ clean:
 logs:
 	@echo "📋 Viewing agent logs (Ctrl+C to stop)..."
 	tail -f logs/*.log
+
+logs-color:
+	@python scripts/view_logs.py
 
 status:
 	@echo "🔍 Checking agent health..."

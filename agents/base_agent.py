@@ -14,6 +14,7 @@ import httpx
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver
 from a2a.types import AgentCard
 from utils import init_anthropic_client
+from utils.mcp_client import create_mcp_client
 
 
 class BaseAgent:
@@ -24,7 +25,9 @@ class BaseAgent:
     - Standardized response builders (_error_response, _success_response)
     - A2A client creation and response parsing
     - Anthropic API calls with consistent error handling
+    - MCP tool selection and calling with LLM-based tool selection
     - JSON utility methods
+    - Event Hub integration for real-time UI updates
     """
 
     def __init__(self, logger: logging.Logger):
@@ -36,6 +39,7 @@ class BaseAgent:
         """
         self.logger = logger
         self.anthropic_client = None
+        self.mcp_client = None
         self.event_hub_url = os.getenv("EVENT_HUB_URL", "http://localhost:8090")
         self.event_hub_enabled = os.getenv("EVENT_HUB_ENABLED", "true").lower() == "true"
 
@@ -177,6 +181,107 @@ class BaseAgent:
         except Exception as e:
             self.logger.error(f"❌ Anthropic API error: {e}")
             return fallback() if callable(fallback) else fallback
+
+    # ===== MCP Integration =====
+
+    def _init_mcp_client(self):
+        """
+        Initialize MCP client if not already initialized.
+
+        Returns:
+            MCP client instance or None if initialization fails
+        """
+        if self.mcp_client is None:
+            try:
+                # Initialize Anthropic client first (needed for tool selection)
+                if self.anthropic_client is None:
+                    self._init_anthropic_client()
+
+                self.mcp_client = create_mcp_client(
+                    logger=self.logger,
+                    anthropic_client=self.anthropic_client
+                )
+                self.logger.info("✅ MCP client initialized")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize MCP client: {e}")
+                raise Exception(f"MCP client initialization failed: {e}")
+        return self.mcp_client
+
+    async def _call_mcp_tool(
+        self,
+        task_description: str,
+        context: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        """
+        Use LLM to select appropriate MCP tool and call it.
+
+        This method:
+        1. Initializes MCP client if needed
+        2. Uses LLM to select the most appropriate tool for the task
+        3. Generates arguments for the tool
+        4. Calls the selected tool
+        5. Returns the result
+
+        Args:
+            task_description: Description of what needs to be done
+            context: Context information for tool selection (e.g., topic, data)
+
+        Returns:
+            Result from the selected MCP tool
+
+        Raises:
+            Exception: If MCP server is unavailable or tool call fails
+
+        Example:
+            result = await self._call_mcp_tool(
+                task_description="Generate an article outline",
+                context={"topic": "AI in Healthcare", "target_length": 800}
+            )
+        """
+        if context is None:
+            context = {}
+
+        # Initialize MCP client if needed
+        if self.mcp_client is None:
+            self._init_mcp_client()
+
+        self.logger.info(f"🔧 Calling MCP tool for task: {task_description[:80]}...")
+
+        try:
+            result = await self.mcp_client.select_and_call_tool(
+                task_description=task_description,
+                context=context
+            )
+            self.logger.info(f"✅ MCP tool call completed successfully")
+            return result
+        except Exception as e:
+            self.logger.error(f"❌ MCP tool call failed: {e}")
+            raise Exception(f"MCP tool call failed: {e}")
+
+    async def _list_mcp_tools(self, force_refresh: bool = False) -> list:
+        """
+        List available MCP tools.
+
+        Args:
+            force_refresh: Force refresh cache even if not expired
+
+        Returns:
+            List of available tool definitions
+
+        Raises:
+            Exception: If MCP server is unavailable
+        """
+        # Initialize MCP client if needed
+        if self.mcp_client is None:
+            self._init_mcp_client()
+
+        try:
+            tools = await self.mcp_client.list_tools(force_refresh=force_refresh)
+            self.logger.info(f"🔧 Found {len(tools)} MCP tools available")
+            return tools
+        except Exception as e:
+            self.logger.error(f"❌ Failed to list MCP tools: {e}")
+            raise Exception(f"Failed to list MCP tools: {e}")
 
     # ===== JSON Utilities =====
 

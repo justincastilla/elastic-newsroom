@@ -26,6 +26,7 @@ PID_FILE=".newsroom_pids"
 
 # Agent configurations: name:port:module
 AGENTS=(
+    "MCP Server:8095:mcp_servers.newsroom_http_server:app"
     "Event Hub:8090:services.event_hub:app"
     "Article API:8085:services.article_api:app"
     "News Chief:8080:agents.news_chief:app"
@@ -57,6 +58,7 @@ if [ "$1" == "--stop" ]; then
     echo -e "${YELLOW}   Killing all uvicorn agent processes...${NC}"
     pkill -9 -f "uvicorn agents" 2>/dev/null || true
     pkill -9 -f "uvicorn services" 2>/dev/null || true
+    pkill -9 -f "uvicorn mcp_servers" 2>/dev/null || true
 
     # Kill any remaining Python processes running our modules
     pkill -9 -f "agents.news_chief" 2>/dev/null || true
@@ -66,6 +68,7 @@ if [ "$1" == "--stop" ]; then
     pkill -9 -f "agents.publisher" 2>/dev/null || true
     pkill -9 -f "services.event_hub" 2>/dev/null || true
     pkill -9 -f "services.article_api" 2>/dev/null || true
+    pkill -9 -f "mcp_servers.newsroom_tools" 2>/dev/null || true
 
     # Stop using PID file
     if [ -f "$PID_FILE" ]; then
@@ -83,9 +86,9 @@ if [ "$1" == "--stop" ]; then
         rm "$PID_FILE"
     fi
 
-    # Force kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
+    # Force kill any processes still bound to the ports (including MCP Server, Event Hub, Article API and UI ports)
     echo -e "${YELLOW}   Force killing any remaining processes on ports...${NC}"
-    for port in 8080 8081 8082 8083 8084 8085 8090 3000 3001; do
+    for port in 8080 8081 8082 8083 8084 8085 8090 8095 3000 3001; do
         PIDS=$(lsof -ti:$port 2>/dev/null || true)
         if [ -n "$PIDS" ]; then
             for PID in $PIDS; do
@@ -100,7 +103,7 @@ if [ "$1" == "--stop" ]; then
 
     # Final verification - check if any ports are still in use
     STILL_IN_USE=""
-    for port in 8080 8081 8082 8083 8084 8085 8090 3000 3001; do
+    for port in 8080 8081 8082 8083 8084 8085 8090 8095 3000 3001; do
         if lsof -ti:$port > /dev/null 2>&1; then
             STILL_IN_USE="$STILL_IN_USE $port"
         fi
@@ -122,7 +125,7 @@ mkdir -p "$LOG_DIR"
 # Check if any ports are already in use
 echo -e "${BLUE}🔍 Checking for port conflicts...${NC}"
 PORTS_IN_USE=""
-for port in 8080 8081 8082 8083 8084 8085 8090; do
+for port in 8080 8081 8082 8083 8084 8085 8090 8095; do
     if lsof -ti:$port > /dev/null 2>&1; then
         PORTS_IN_USE="$PORTS_IN_USE $port"
     fi
@@ -151,7 +154,7 @@ start_agent() {
 
     echo -e "${YELLOW}🚀 Starting $NAME on port $PORT...${NC}"
 
-    # Start uvicorn directly with the module
+    # Start uvicorn with the module
     if [ -n "$RELOAD_FLAG" ]; then
         uvicorn "$MODULE" --host localhost --port "$PORT" $RELOAD_FLAG > "$LOG_FILE" 2>&1 &
     else
@@ -196,6 +199,7 @@ if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✅ All agents started successfully!${NC}"
     echo ""
     echo -e "${BLUE}📊 Agent Endpoints:${NC}"
+    echo -e "${BLUE}   MCP Server:  http://localhost:8095 (Tool Provider)${NC}"
     echo -e "${BLUE}   Event Hub:   http://localhost:8090${NC}"
     echo -e "${BLUE}   Article API: http://localhost:8085${NC}"
     echo -e "${BLUE}   News Chief:  http://localhost:8080${NC}"

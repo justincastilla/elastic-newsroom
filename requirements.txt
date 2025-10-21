@@ -17,6 +17,9 @@ elasticsearch>=9.1.1
 python-dotenv==1.0.0
 loguru==0.7.2
 
+# MCP (Model Context Protocol)
+fastmcp>=2.12.5
+
 # Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

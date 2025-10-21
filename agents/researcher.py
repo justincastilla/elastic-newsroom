@@ -19,7 +19,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server, format_json_for_log
 from agents.base_agent import BaseAgent
 
 # Load environment variables
@@ -43,6 +43,9 @@ class ResearcherAgent(BaseAgent):
         # Initialize Anthropic client using centralized utility (from BaseAgent)
         self._init_anthropic_client()
 
+        # Initialize MCP client for tool calling
+        self._init_mcp_client()
+
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
         Main entry point for the agent. Processes a query and returns a result.
@@ -56,7 +59,7 @@ class ResearcherAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -172,101 +175,40 @@ class ResearcherAgent(BaseAgent):
         }
 
     async def _conduct_bulk_research(self, questions: List[str], topic: str) -> List[Dict[str, Any]]:
-        """Conduct research for multiple questions in a single API call using Anthropic"""
+        """Conduct research for multiple questions using MCP research_questions tool"""
 
-        # Build numbered questions for the prompt
-        numbered_questions = "\n".join([f"{i}. {q}" for i, q in enumerate(questions, 1)])
+        try:
+            logger.info(f"🔧 Calling MCP research_questions tool for {len(questions)} questions...")
 
-        # Build research prompt
-        prompt = f"""You are a research assistant for Elastic News, a technology news publication.
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-Article Topic: {topic}
+            result = await self.mcp_client.call_tool(
+                tool_name="research_questions",
+                arguments={
+                    "questions": questions,
+                    "topic": topic
+                }
+            )
 
-Research Questions:
-{numbered_questions}
+            # Parse the JSON response
+            results = json.loads(result) if isinstance(result, str) else result
+            logger.info(f"✅ Received {len(results)} research results from MCP tool")
 
-Please provide comprehensive research for ALL questions above. Generate realistic, plausible data that sounds factual (even though it's fictional for this demo).
+            # Ensure we have results for all questions (in case tool didn't answer all)
+            if len(results) < len(questions):
+                logger.warning(f"⚠️  MCP tool returned {len(results)} results for {len(questions)} questions")
+                # Fill in missing results with mock data
+                for i in range(len(results), len(questions)):
+                    results.append(self._generate_mock_research(questions[i]))
 
-Provide your response as a JSON array with one object per question, maintaining the same numbering order. Use this exact format:
+            return results
 
-[
-  {{
-    "question_number": 1,
-    "question": "First question text here",
-    "claim_verified": true,
-    "confidence": 85,
-    "summary": "Brief 1-2 sentence summary of findings",
-    "facts": [
-      "Specific factual statement 1",
-      "Specific factual statement 2",
-      "Specific factual statement 3"
-    ],
-    "figures": {{
-      "percentages": ["42%", "85% increase"],
-      "dollar_amounts": ["$2.3 billion", "$500 million"],
-      "numbers": ["1,200 companies", "3.5 million users"],
-      "dates": ["Q4 2024", "January 2025"],
-      "companies": ["Company A", "Company B", "Company C"]
-    }},
-    "sources": [
-      "Industry Report 2024",
-      "Market Analysis Q4 2024",
-      "Tech Survey 2025"
-    ]
-  }},
-  {{
-    "question_number": 2,
-    "question": "Second question text here",
-    ... (same structure for each question)
-  }}
-]
-
-Important:
-- Answer ALL {len(questions)} questions in the array
-- Keep the same numbering order (1, 2, 3, etc.)
-- Generate plausible, realistic-sounding data
-- Include specific figures, percentages, and company names where relevant
-- Make it sound authoritative and well-researched
-
-Provide ONLY the JSON array, no additional text."""
-
-        # Use Anthropic if available
-        if self.anthropic_client:
-            try:
-                logger.info(f"🤖 Making single Anthropic API call for {len(questions)} questions...")
-                message = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=4000,  # Increased for multiple questions
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
-                )
-
-                # Parse the JSON response
-                research_text = message.content[0].text
-                # Use BaseAgent helper to strip markdown code blocks
-                research_text = self._strip_json_codeblocks(research_text)
-
-                results = json.loads(research_text)
-                logger.info(f"✅ Received {len(results)} research results from Anthropic")
-
-                # Ensure we have results for all questions (in case API didn't answer all)
-                if len(results) < len(questions):
-                    logger.warning(f"⚠️  API returned {len(results)} results for {len(questions)} questions")
-                    # Fill in missing results with mock data
-                    for i in range(len(results), len(questions)):
-                        results.append(self._generate_mock_research(questions[i]))
-
-                return results
-
-            except Exception as e:
-                logger.error(f"❌ Anthropic API error: {e}", exc_info=True)
-                # Fallback to mock research for all questions
-                return [self._generate_mock_research(q) for q in questions]
-        else:
-            # No API key, use mock research for all questions
-            return [self._generate_mock_research(q) for q in questions]
+        except Exception as e:
+            logger.error(f"❌ MCP tool call error: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP research_questions tool failed: {e}")
 
     def _generate_mock_research(self, question: str) -> Dict[str, Any]:
         """Generate mock research when Anthropic API is not available"""

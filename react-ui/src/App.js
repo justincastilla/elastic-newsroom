@@ -14,9 +14,10 @@ function App() {
   const [error, setError] = useState(null);
   const [viewingArticle, setViewingArticle] = useState(null);
   const [storyRestored, setStoryRestored] = useState(false);
+  const [articleHeadline, setArticleHeadline] = useState(null);
 
   const { status, workflowProgress, activeStories, updateStatus, resetWorkflowProgress } = useWorkflowStatus(
-    currentStory?.story_id, 
+    currentStory?.story_id,
     !!currentStory
   );
 
@@ -82,12 +83,41 @@ function App() {
     }
   }, [currentStory]);
 
+  // Fetch article headline when workflow is complete
+  useEffect(() => {
+    const fetchHeadline = async () => {
+      if (workflowProgress.isComplete && currentStory?.story_id && !articleHeadline) {
+        try {
+          const response = await fetch(`http://localhost:8085/article/${currentStory.story_id}`);
+          if (response.ok) {
+            const articleData = await response.json();
+            // Extract headline from content if it starts with "HEADLINE:"
+            let headline = articleData.headline;
+            if (headline === 'Untitled' && articleData.content) {
+              const lines = articleData.content.split('\n');
+              const headlineLine = lines.find(line => line.trim().startsWith('HEADLINE:'));
+              if (headlineLine) {
+                headline = headlineLine.replace('HEADLINE:', '').trim();
+              }
+            }
+            setArticleHeadline(headline);
+          }
+        } catch (error) {
+          console.error('Error fetching article headline:', error);
+        }
+      }
+    };
+
+    fetchHeadline();
+  }, [workflowProgress.isComplete, currentStory, articleHeadline]);
+
   const handleStartWorkflow = async (storyData) => {
     setIsLoading(true);
     setWorkflowStarting(true);
     setError(null);
     setCurrentStory(null);
-    
+    setArticleHeadline(null);
+
     // Reset workflow progress for new story
     resetWorkflowProgress();
 
@@ -177,7 +207,7 @@ function App() {
             <div className="flex items-center">
               <Newspaper className="h-5 w-5 text-blue-600 mr-2" />
               <span className="text-blue-800 font-medium">
-                Continuing to monitor story: "{currentStory.topic}" (ID: {currentStory.story_id})
+                Continuing to monitor story: "{articleHeadline || currentStory.topic}" (ID: {currentStory.story_id})
               </span>
             </div>
           </div>
