@@ -382,7 +382,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ELASTICSEARCH_ENDPOINT: http://localhost:9200
-          ELASTIC_SEARCH_API_KEY: ""
+          ELASTICSEARCH_API_KEY: ""
 
       - name: Wait for agents
         run: sleep 10

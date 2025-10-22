@@ -174,7 +174,7 @@ def main():
     env_ok = True
     env_ok &= os.getenv('ANTHROPIC_API_KEY') is not None
     env_ok &= os.getenv('ELASTICSEARCH_ENDPOINT') is not None
-    env_ok &= os.getenv('ELASTIC_SEARCH_API_KEY') is not None
+    env_ok &= os.getenv('ELASTICSEARCH_API_KEY') is not None
     
     if not env_ok:
         print("❌ Missing required environment variables.")

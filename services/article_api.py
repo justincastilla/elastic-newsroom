@@ -43,7 +43,7 @@ es_index = os.getenv("ELASTIC_ARCHIVIST_INDEX", "news_archive")
 
 try:
     es_endpoint = os.getenv("ELASTICSEARCH_ENDPOINT")
-    es_api_key = os.getenv("ELASTIC_SEARCH_API_KEY")
+    es_api_key = os.getenv("ELASTICSEARCH_API_KEY")
 
     if es_endpoint and es_api_key:
         es_client = Elasticsearch(

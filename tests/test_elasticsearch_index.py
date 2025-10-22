@@ -33,7 +33,7 @@ def test_elasticsearch_index():
 
     # Get configuration from environment
     es_endpoint = os.getenv("ELASTICSEARCH_ENDPOINT")
-    es_api_key = os.getenv("ELASTIC_SEARCH_API_KEY")
+    es_api_key = os.getenv("ELASTICSEARCH_API_KEY")
     test_index_name = "news_archive_test"
 
     if not es_endpoint:
@@ -42,7 +42,7 @@ def test_elasticsearch_index():
         sys.exit(1)
 
     if not es_api_key:
-        print("❌ Error: ELASTIC_SEARCH_API_KEY not set in environment")
+        print("❌ Error: ELASTICSEARCH_API_KEY not set in environment")
         print("   Please set it in your .env file")
         sys.exit(1)
 

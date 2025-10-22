@@ -43,7 +43,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
 # Required for Elasticsearch indexing
 ELASTICSEARCH_ENDPOINT=https://your-cluster.es.region.gcp.elastic.cloud:443
-ELASTIC_SEARCH_API_KEY=your_elastic_api_key_here
+ELASTICSEARCH_API_KEY=your_elastic_api_key_here
 ELASTIC_ARCHIVIST_INDEX=news_archive
 
 # Optional for historical search (Archivist)

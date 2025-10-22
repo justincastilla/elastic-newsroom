@@ -144,7 +144,7 @@ USE_REAL_SERVICES=true pytest -v
 **Requirements for real services:**
 - Valid `ANTHROPIC_API_KEY` in `.env`
 - Running Elasticsearch instance
-- Valid `ELASTICSEARCH_ENDPOINT` and `ELASTIC_SEARCH_API_KEY`
+- Valid `ELASTICSEARCH_ENDPOINT` and `ELASTICSEARCH_API_KEY`
 - All agents running (`./start_newsroom.sh`)
 
 ### Writing Tests with Mocks

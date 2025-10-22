@@ -16,7 +16,7 @@ ANTHROPIC_API_KEY=your_anthropic_api_key_here
 #### Elasticsearch (Direct Access)
 ```bash
 ELASTICSEARCH_ENDPOINT=https://your-cluster.es.region.gcp.elastic.cloud:443
-ELASTIC_SEARCH_API_KEY=your_elasticsearch_api_key_here
+ELASTICSEARCH_API_KEY=your_elasticsearch_api_key_here
 ELASTIC_ARCHIVIST_INDEX=news_archive
 ```
 **Used by:** Publisher (for indexing articles)
@@ -68,7 +68,7 @@ cp env.example .env
 At minimum, you need:
 - `ANTHROPIC_API_KEY`
 - `ELASTICSEARCH_ENDPOINT`
-- `ELASTIC_SEARCH_API_KEY`
+- `ELASTICSEARCH_API_KEY`
 - `ELASTIC_ARCHIVIST_INDEX`
 
 ### 3. Create Elasticsearch index
@@ -122,7 +122,7 @@ If not configured:
 ### Issue: Publisher can't connect to Elasticsearch
 **Check:**
 - `ELASTICSEARCH_ENDPOINT` is correct format (https://...)
-- `ELASTIC_SEARCH_API_KEY` is valid and has write permissions
+- `ELASTICSEARCH_API_KEY` is valid and has write permissions
 - Network connectivity to Elastic Cloud
 
 ### Issue: Archivist returns 401 Unauthorized
@@ -166,7 +166,7 @@ ANTHROPIC_API_KEY=sk-ant-api03-xxx...
 
 # Elasticsearch (Direct Write Access)
 ELASTICSEARCH_ENDPOINT=<your_es_endpoint_here>
-ELASTIC_SEARCH_API_KEY=<your_es_api_key_here>
+ELASTICSEARCH_API_KEY=<your_es_api_key_here>
 
 # Archivist (A2A Read Access) - Optional
 ELASTIC_ARCHIVIST_AGENT_CARD_URL=<your_archivist_agent_card_here>

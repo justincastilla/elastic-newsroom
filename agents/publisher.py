@@ -47,7 +47,7 @@ class PublisherAgent(BaseAgent):
 
         # Initialize Elasticsearch client
         es_endpoint = os.getenv("ELASTICSEARCH_ENDPOINT")
-        es_api_key = os.getenv("ELASTIC_SEARCH_API_KEY")
+        es_api_key = os.getenv("ELASTICSEARCH_API_KEY")
 
         if es_endpoint and es_api_key:
             try:

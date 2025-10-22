@@ -72,7 +72,7 @@ cp env.example .env
 # Edit .env with your credentials:
 # - ANTHROPIC_API_KEY (required)
 # - ELASTICSEARCH_ENDPOINT (required)
-# - ELASTIC_SEARCH_API_KEY (required)
+# - ELASTICSEARCH_API_KEY (required)
 # - ELASTIC_ARCHIVIST_AGENT_CARD_URL (required)
 # - ELASTIC_ARCHIVIST_API_KEY (required)
 ```
