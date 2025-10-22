@@ -22,7 +22,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server
+from utils import setup_logger, load_env_config, init_anthropic_client, run_agent_server, format_json_for_log
 from agents.base_agent import BaseAgent
 
 # Load environment variables
@@ -73,6 +73,9 @@ class PublisherAgent(BaseAgent):
         else:
             logger.warning("⚠️  Tags will be empty")
 
+        # Initialize MCP client for tool calling
+        self._init_mcp_client()
+
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
         Main entry point for the agent. Processes a query and returns a result.
@@ -86,7 +89,7 @@ class PublisherAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -169,12 +172,6 @@ class PublisherAgent(BaseAgent):
         logger.info("📦 Building Elasticsearch document...")
         es_document = self._build_es_document(article_data, tags, categories)
 
-        # Mock CI/CD - Step 1: Build
-        logger.info("🔨 [MOCK CI/CD] Starting build pipeline...")
-        time.sleep(2)  # Simulate build time
-        build_number = f"#{int(time.time()) % 10000}"
-        logger.info(f"✅ [MOCK CI/CD] Build {build_number} completed successfully")
-
         # ALWAYS save to local file first (fallback if Elasticsearch fails)
         logger.info(f"💾 Saving article to local file...")
         file_path = await self._save_article_to_file(article_data, tags, categories)
@@ -219,20 +216,11 @@ class PublisherAgent(BaseAgent):
             # Don't return error - continue with local file publication
             es_success = False
 
-        # Mock CI/CD - Step 2: Deploy
-        logger.info("🚀 [MOCK CI/CD] Deploying to production...")
-        time.sleep(1.5)  # Simulate deployment time
-        logger.info("✅ [MOCK CI/CD] Deployment completed successfully")
-        logger.info("   Environment: production")
-        logger.info("   URL: https://newsroom.example.com/articles/" + article_data.get('url_slug', story_id))
+        # CI/CD Deployment via MCP tool
+        deployment_result = await self._deploy_to_production(story_id, article_data)
 
-        # Mock CRM - Notify subscribers
-        logger.info("📧 [MOCK CRM] Notifying subscribers...")
-        time.sleep(1)  # Simulate CRM processing
-        subscriber_count = 1247  # Mock subscriber count
-        logger.info(f"✅ [MOCK CRM] Notification sent to {subscriber_count} subscribers")
-        logger.info("   Email template: new_article_published")
-        logger.info("   Open rate estimate: 42%")
+        # CRM Notification via MCP tool
+        notification_result = await self._notify_subscribers(story_id, article_data)
 
         # Store publication record
         publication_record = {
@@ -242,9 +230,9 @@ class PublisherAgent(BaseAgent):
             "file_path": file_path,
             "es_index": self.es_index if es_success else None,
             "es_document_id": es_response['_id'] if es_success else None,
-            "build_number": build_number,
-            "deployment_url": f"https://newsroom.example.com/articles/{article_data.get('url_slug', story_id)}",
-            "subscribers_notified": subscriber_count,
+            "build_number": deployment_result.get("build", {}).get("number"),
+            "deployment_url": deployment_result.get("deployment", {}).get("url"),
+            "subscribers_notified": notification_result.get("notification", {}).get("subscribers_notified"),
             "tags": tags,
             "categories": categories,
             "elasticsearch_indexed": es_success
@@ -273,9 +261,9 @@ class PublisherAgent(BaseAgent):
             "story_id": story_id,
             "published_at": publication_record["published_at"],
             "file_path": file_path,
-            "build_number": build_number,
+            "build_number": publication_record["build_number"],
             "deployment_url": publication_record["deployment_url"],
-            "subscribers_notified": subscriber_count,
+            "subscribers_notified": publication_record["subscribers_notified"],
             "tags": tags,
             "categories": categories
         }
@@ -354,59 +342,119 @@ class PublisherAgent(BaseAgent):
         }
 
     async def _generate_tags_and_categories(self, article_data: Dict[str, Any]) -> tuple[List[str], List[str]]:
-        """Generate tags and categories from article content using Anthropic"""
-
-        if not self.anthropic_client:
-            logger.warning("⚠️  Anthropic not available, returning empty tags/categories")
-            return [], []
+        """Generate tags and categories from article content using MCP generate_tags tool"""
 
         headline = article_data.get("headline", "")
         content = article_data.get("content", "")
         topic = article_data.get("topic", "")
 
-        # Build prompt for tag generation
-        prompt = f"""Analyze this news article and generate relevant tags and categories.
-
-Headline: {headline}
-Topic: {topic}
-Content Preview: {content[:500]}...
-
-Generate:
-1. Tags: 5-7 specific keywords that describe the article (lowercase, hyphenated if multi-word)
-2. Categories: 2-3 broad categories (e.g., "technology", "business", "science", "politics", "sports")
-
-Return your response as a JSON object:
-{{
-  "tags": ["tag1", "tag2", "tag3", ...],
-  "categories": ["category1", "category2", ...]
-}}
-
-Return ONLY the JSON, no additional text."""
-
         try:
-            message = self.anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=500,
-                messages=[{
-                    "role": "user",
-                    "content": prompt
-                }]
+            logger.info(f"🔧 Calling MCP generate_tags tool...")
+
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
+
+            result = await self.mcp_client.call_tool(
+                tool_name="generate_tags",
+                arguments={
+                    "headline": headline,
+                    "content": content[:500],  # First 500 chars
+                    "topic": topic
+                }
             )
 
-            response_text = message.content[0].text
+            # Parse the JSON response
+            tag_data = json.loads(result) if isinstance(result, str) else result
+            tags = tag_data.get("tags", [])
+            categories = tag_data.get("categories", [])
 
-            # Use BaseAgent helper to strip markdown code blocks
-            response_text = self._strip_json_codeblocks(response_text)
-
-            result = json.loads(response_text)
-            tags = result.get("tags", [])
-            categories = result.get("categories", [])
-
+            logger.info(f"✅ Tags generated: {len(tags)} tags, {len(categories)} categories")
             return tags, categories
 
         except Exception as e:
-            logger.error(f"❌ Failed to generate tags/categories: {e}")
-            return [], []
+            logger.error(f"❌ MCP generate_tags tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP generate_tags tool failed: {e}")
+
+    async def _deploy_to_production(self, story_id: str, article_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Deploy article to production via MCP deploy_to_production tool"""
+        try:
+            logger.info("🚀 Deploying to production via CI/CD pipeline...")
+
+            # Direct call to MCP tool
+            if self.mcp_client is None:
+                self._init_mcp_client()
+
+            url_slug = article_data.get('url_slug', story_id)
+            build_number = f"#{int(time.time()) % 10000}"
+
+            result = await self.mcp_client.call_tool(
+                tool_name="deploy_to_production",
+                arguments={
+                    "story_id": story_id,
+                    "url_slug": url_slug,
+                    "build_number": build_number
+                }
+            )
+
+            # Parse the JSON response
+            deployment_data = json.loads(result) if isinstance(result, str) else result
+
+            # Log deployment results
+            build_info = deployment_data.get("build", {})
+            deploy_info = deployment_data.get("deployment", {})
+
+            logger.info(f"✅ Build {build_info.get('number')} completed")
+            logger.info(f"   Duration: {build_info.get('duration_seconds')}s")
+            logger.info(f"✅ Deployment to {deploy_info.get('environment')} completed")
+            logger.info(f"   URL: {deploy_info.get('url')}")
+            logger.info(f"   Deployed at: {deploy_info.get('deployed_at')}")
+
+            return deployment_data
+
+        except Exception as e:
+            logger.error(f"❌ Deployment failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def _notify_subscribers(self, story_id: str, article_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Notify subscribers via MCP notify_subscribers tool"""
+        try:
+            logger.info("📧 Notifying subscribers via CRM...")
+
+            # Direct call to MCP tool
+            if self.mcp_client is None:
+                self._init_mcp_client()
+
+            headline = article_data.get('headline', article_data.get('topic', 'Untitled'))
+            topic = article_data.get('topic', 'General')
+
+            result = await self.mcp_client.call_tool(
+                tool_name="notify_subscribers",
+                arguments={
+                    "story_id": story_id,
+                    "headline": headline,
+                    "topic": topic
+                }
+            )
+
+            # Parse the JSON response
+            notification_data = json.loads(result) if isinstance(result, str) else result
+
+            # Log notification results
+            notif_info = notification_data.get("notification", {})
+            metrics = notif_info.get("estimated_metrics", {})
+
+            logger.info(f"✅ Notification sent to {notif_info.get('subscribers_notified')} subscribers")
+            logger.info(f"   Email template: {notif_info.get('email_template')}")
+            logger.info(f"   Expected open rate: {metrics.get('open_rate')}")
+            logger.info(f"   Sent at: {notif_info.get('sent_at')}")
+
+            return notification_data
+
+        except Exception as e:
+            logger.error(f"❌ Subscriber notification failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def _save_article_to_file(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> str:
         """Save article to local markdown file"""
@@ -565,11 +613,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Publishes finalized articles to Elasticsearch, handles CI/CD deployment, and sends CRM notifications. Works through News Chief for workflow coordination.",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/publisher-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=20
         ),

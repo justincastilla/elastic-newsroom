@@ -20,7 +20,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
-from utils import setup_logger, load_env_config, init_anthropic_client, extract_json_from_llm_response, run_agent_server
+from utils import setup_logger, load_env_config, init_anthropic_client, extract_json_from_llm_response, run_agent_server, format_json_for_log
 from agents.base_agent import BaseAgent
 
 # Load environment variables
@@ -45,6 +45,9 @@ class EditorAgent(BaseAgent):
         # Initialize Anthropic client using centralized utility (from BaseAgent)
         self._init_anthropic_client()
 
+        # Initialize MCP client for tool calling
+        self._init_mcp_client()
+
     async def invoke(self, query: str) -> Dict[str, Any]:
         """
         Main entry point for the agent. Processes a query and returns a result.
@@ -58,7 +61,7 @@ class EditorAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -201,88 +204,39 @@ class EditorAgent(BaseAgent):
             }
 
     async def _perform_review(self, draft: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform editorial review using Anthropic Claude"""
+        """Perform editorial review using MCP review_article tool"""
         content = draft.get("content", "")
         assignment = draft.get("assignment", {})
         target_length = assignment.get("target_length", 1000)
         current_word_count = draft.get("word_count", len(content.split()))
+        topic = assignment.get("topic", "N/A")
 
-        # Build review prompt
-        prompt = f"""You are a professional editor for Elastic News, a technology news publication.
+        try:
+            logger.info(f"🔧 Calling MCP review_article tool...")
 
-Please review the following article draft and provide detailed editorial feedback.
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-ARTICLE DRAFT:
-{content}
+            result = await self.mcp_client.call_tool(
+                tool_name="review_article",
+                arguments={
+                    "content": content,
+                    "word_count": current_word_count,
+                    "target_length": target_length,
+                    "topic": topic
+                }
+            )
 
-ASSIGNMENT DETAILS:
-- Target Length: {target_length} words
-- Current Word Count: {current_word_count} words
-- Topic: {assignment.get('topic', 'N/A')}
-- Angle: {assignment.get('angle', 'N/A')}
+            # Parse the JSON response
+            review_data = json.loads(result) if isinstance(result, str) else result
+            logger.info(f"✅ Review completed: {review_data.get('approval_status')}")
+            return review_data
 
-REVIEW CRITERIA:
-1. Grammar & Spelling: Check for grammatical errors, typos, and spelling mistakes
-2. Professional Tone: Ensure the tone is professional, objective, and appropriate for a tech news publication
-3. Consistency: Check for consistent terminology, voice, and style throughout
-4. Length: The article should be within 50 words of the target length ({target_length - 50} to {target_length + 50} words)
-
-Please provide your review in the following JSON format:
-{{
-  "overall_assessment": "brief overall assessment (1-2 sentences)",
-  "grammar_issues": [
-    {{"issue": "description of grammar issue", "location": "quote from article", "suggestion": "corrected version"}}
-  ],
-  "tone_issues": [
-    {{"issue": "description of tone issue", "location": "quote from article", "suggestion": "improved version"}}
-  ],
-  "consistency_issues": [
-    {{"issue": "description of consistency issue", "location": "quote from article", "suggestion": "consistent version"}}
-  ],
-  "length_assessment": {{
-    "current_length": {current_word_count},
-    "target_length": {target_length},
-    "difference": {current_word_count - target_length},
-    "meets_requirement": {"true" if abs(current_word_count - target_length) <= 50 else "false"},
-    "recommendation": "specific recommendation about length adjustment"
-  }},
-  "suggested_edits": [
-    {{"type": "grammar|tone|consistency|length", "original": "original text", "suggested": "suggested replacement", "reason": "why this change is needed"}}
-  ],
-  "approval_status": "approved|needs_minor_revisions|needs_major_revisions",
-  "editor_notes": "additional notes or recommendations for the reporter"
-}}
-
-Provide only the JSON response, no additional text."""
-
-        # Use Anthropic if available, otherwise mock
-        if self.anthropic_client:
-            try:
-                message = self.anthropic_client.messages.create(
-                    model="claude-sonnet-4-20250514",
-                    max_tokens=4096,  # Increased from 3000 to handle longer JSON responses
-                    messages=[{
-                        "role": "user",
-                        "content": prompt
-                    }]
-                )
-
-                # Parse the JSON response using centralized utility
-                review_text = message.content[0].text
-                review_data = extract_json_from_llm_response(review_text, logger)
-                
-                if review_data:
-                    return review_data
-                else:
-                    # If JSON extraction failed, return mock review
-                    logger.warning("Failed to extract JSON from LLM response, returning mock review")
-                    return self._generate_mock_review(current_word_count, target_length)
-
-            except Exception as e:
-                logger.error(f"Anthropic API error: {e}", exc_info=True)
-                return self._generate_mock_review(current_word_count, target_length)
-        else:
-            return self._generate_mock_review(current_word_count, target_length)
+        except Exception as e:
+            logger.error(f"❌ MCP review_article tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP review_article tool failed: {e}")
 
     def _generate_mock_review(self, current_word_count: int, target_length: int) -> Dict[str, Any]:
         """Generate a simple mock review when Anthropic API is not available"""
@@ -403,11 +357,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Reviews article drafts for grammar, tone, consistency, and length. Works through News Chief for workflow coordination.",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/editor-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=20
         ),

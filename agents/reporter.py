@@ -8,6 +8,7 @@ Uses Anthropic Claude for AI-powered content generation.
 import json
 import os
 import time
+import asyncio
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -21,8 +22,9 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import create_text_message_object
-from utils import setup_logger, load_env_config, run_agent_server
+from utils import setup_logger, load_env_config, run_agent_server, format_json_for_log, truncate_text
 from agents.base_agent import BaseAgent
+from agents.archivist_client import converse, send_task
 
 # Load environment variables
 load_env_config()
@@ -50,33 +52,20 @@ class ReporterAgent(BaseAgent):
         self.editor_url = editor_url or "http://localhost:8082"
         self.researcher_url = researcher_url or "http://localhost:8083"
         self.publisher_url = publisher_url or "http://localhost:8084"
-        # Get Archivist URL from environment or parameter
-        self.archivist_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")
-        self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
 
-        # Parse Archivist URL once during initialization (cached for efficiency)
-        self._archivist_endpoint: Optional[str] = None
-        self._archivist_agent_id: Optional[str] = None
-        if self.archivist_url:
-            self._parse_archivist_url()
+        # Get Archivist configuration from environment
+        # Prefer direct agent URL over agent card URL
+        self.archivist_agent_url = os.getenv("ELASTIC_ARCHIVIST_AGENT_URL")  # Direct endpoint (preferred)
+        self.archivist_card_url = archivist_url or os.getenv("ELASTIC_ARCHIVIST_AGENT_CARD_URL")  # Agent card URL (fallback)
+        self.archivist_api_key = os.getenv("ELASTIC_ARCHIVIST_API_KEY")
 
         # Initialize Anthropic client using centralized utility (from BaseAgent)
         self._init_anthropic_client()
         if not self.anthropic_client:
             logger.warning("Will use mock article generation")
 
-    def _parse_archivist_url(self):
-        """Parse Archivist URL once during initialization for efficiency"""
-        if "/api/agent_builder/a2a/" in self.archivist_url:
-            # Extract agent_id from URL
-            agent_id = self.archivist_url.split("/")[-1]
-            if agent_id.endswith(".json"):
-                agent_id = agent_id[:-5]
-
-            # Build converse API endpoint
-            base_url = self.archivist_url.split("/api/agent_builder/")[0]
-            self._archivist_endpoint = f"{base_url}/api/agent_builder/a2a/archive-agent"
-            self._archivist_agent_id = agent_id
+        # Initialize MCP client for tool calling
+        self._init_mcp_client()
 
     # Note: Helper methods (_error_response, _success_response, _create_a2a_client,
     # _parse_a2a_response, _strip_json_codeblocks, _call_anthropic) are now
@@ -95,7 +84,7 @@ class ReporterAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -216,7 +205,6 @@ class ReporterAgent(BaseAgent):
             logger.info(f"   Research questions identified: {len(research_questions)}")
 
             # Call both Researcher and Archivist in parallel
-            import asyncio
             research_results = None
             archive_results = None
 
@@ -258,20 +246,29 @@ class ReporterAgent(BaseAgent):
                     logger.error(f"❌ Researcher failed: {research_response}")
                 elif research_response.get("status") == "success":
                     research_results = research_response.get("research_results", [])
-                    self.research_data[story_id] = research_results
+                    self.research_data[story_id] = {
+                        "questions": research_questions,
+                        "results": research_results
+                    }
                     logger.info(f"✅ Received research data: {len(research_results)} answers")
                 else:
                     logger.warning(f"⚠️  Research request failed: {research_response.get('message')}")
 
                 # Process Archivist response - REQUIRED, stop workflow if it fails
                 if isinstance(archive_response, Exception):
-                    logger.error(f"❌ CRITICAL: Archivist failed - this is a REQUIRED component")
-                    logger.error(f"   Error: {archive_response}")
+                    error_msg = (
+                        f"Workflow error: Archivist failed with exception. "
+                        f"The Archivist is required for the Reporter workflow. "
+                        f"Error: {archive_response}"
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist failed - this is a REQUIRED component: {archive_response}")
+                    raise Exception(error_msg)
                 elif archive_response.get("status") == "success":
                     archive_results = archive_response.get("articles", [])
-                    self.archive_data[story_id] = archive_results
+                    self.archive_data[story_id] = {
+                        "results": archive_results
+                    }
                     logger.info(f"✅ Received archive data: {len(archive_results)} historical articles")
                     self.archivist_status[story_id] = "completed"
 
@@ -282,20 +279,33 @@ class ReporterAgent(BaseAgent):
                         data={"articles_found": len(archive_results)}
                     )
                 elif archive_response.get("status") in ["timeout", "error"]:
-                    error_msg = f"Archivist {archive_response.get('status')}: {archive_response.get('error', 'Unknown error')}"
-                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    status = archive_response.get('status')
+                    error_detail = archive_response.get('error', 'Unknown error')
+                    error_msg = (
+                        f"Workflow error: Archivist {status} - {error_detail}. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist {archive_response.get('status')} - this is a REQUIRED component: {archive_response.get('error', 'Unknown error')}")
+                    raise Exception(error_msg)
                 elif archive_response.get("status") == "skipped":
-                    logger.error(f"❌ CRITICAL: Archivist skipped - this is a REQUIRED component")
-                    logger.error(f"   Message: {archive_response.get('message')}")
+                    skip_message = archive_response.get('message', 'No reason provided')
+                    error_msg = (
+                        f"Workflow error: Archivist was skipped - {skip_message}. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist skipped - this is a REQUIRED component: {archive_response.get('message')}")
+                    raise Exception(error_msg)
                 else:
-                    error_msg = f"Archivist returned unexpected status: {archive_response.get('status')}"
-                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    unexpected_status = archive_response.get('status', 'unknown')
+                    error_msg = (
+                        f"Workflow error: Archivist returned unexpected status '{unexpected_status}'. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist returned unexpected status: {archive_response.get('status')} - this is a REQUIRED component")
+                    raise Exception(error_msg)
             else:
                 logger.info("ℹ️  No research questions needed for this article")
 
@@ -391,46 +401,36 @@ class ReporterAgent(BaseAgent):
             }
 
     async def _generate_outline_and_questions(self, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate article outline and identify research questions"""
+        """Generate article outline and identify research questions using MCP generate_outline tool"""
         topic = assignment.get("topic", "Unknown Topic")
         angle = assignment.get("angle", "")
         target_length = assignment.get("target_length", 1000)
 
-        prompt = f"""You are a professional journalist for Elastic News planning an article.
+        try:
+            logger.info(f"🔧 Calling MCP generate_outline tool...")
 
-Topic: {topic}
-Angle: {angle if angle else "General overview"}
-Target Length: {target_length} words
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-Create a brief outline for this article and identify 3-5 research questions that would strengthen the piece with factual data, statistics, or expert insights.
+            result = await self.mcp_client.call_tool(
+                tool_name="generate_outline",
+                arguments={
+                    "topic": topic,
+                    "angle": angle,
+                    "target_length": target_length
+                }
+            )
 
-Provide your response in JSON format:
-{{
-  "outline": "Brief 3-4 point outline of the article structure",
-  "research_questions": [
-    "What percentage of companies/organizations are adopting this technology?",
-    "What are the key statistics or market data related to this topic?",
-    "Who are the leading companies or experts in this space?",
-    "What recent developments or trends are worth highlighting?"
-  ]
-}}
+            # Parse the JSON response
+            outline_data = json.loads(result) if isinstance(result, str) else result
+            logger.info(f"✅ Outline generated with {len(outline_data.get('research_questions', []))} research questions")
+            return outline_data
 
-Limit to 3-5 focused research questions. Provide only the JSON, no additional text."""
-
-        default_response = {
-            "outline": "Introduction, Background, Current State, Future Outlook",
-            "research_questions": []
-        }
-
-        response_text = await self._call_anthropic(prompt, max_tokens=1500, fallback=lambda: None)
-        if response_text:
-            try:
-                response_text = self._strip_json_codeblocks(response_text)
-                return json.loads(response_text)
-            except Exception as e:
-                logger.error(f"Error parsing outline JSON: {e}", exc_info=True)
-                return default_response
-        return default_response
+        except Exception as e:
+            logger.error(f"❌ MCP generate_outline tool failed: {e}", exc_info=True)
+            # MCP server is REQUIRED - re-raise with clear message
+            raise
 
     async def _send_to_researcher(self, story_id: str, assignment: Dict[str, Any], questions: List[str]) -> Dict[str, Any]:
         """Send research questions to Researcher agent via A2A"""
@@ -471,251 +471,97 @@ Limit to 3-5 focused research questions. Provide only the JSON, no additional te
             return self._error_response(f"Failed to contact Researcher: {str(e)}")
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for historical articles via Archivist agent using A2A JSONRPC protocol with retry logic"""
-        # Check if Archivist URL is configured
-        if not self.archivist_url or not self._archivist_endpoint or not self._archivist_agent_id:
-            logger.error("❌ ELASTIC_ARCHIVIST_AGENT_CARD_URL not set or invalid - Archivist is REQUIRED")
-            raise Exception("Archivist agent card URL not configured or invalid - Archivist is REQUIRED for workflow")
+        """
+        Search for historical articles via Archivist agent using the archivist_client module.
+
+        Raises:
+            Exception: If Archivist configuration is missing (URL or API key)
+        """
+        # Validate Archivist configuration (required for workflow)
+        if not self.archivist_agent_url and not self.archivist_card_url:
+            error_msg = (
+                "Configuration error: Archivist URL not configured. "
+                "Set ELASTIC_ARCHIVIST_AGENT_URL or ELASTIC_ARCHIVIST_AGENT_CARD_URL environment variable. "
+                "The Archivist is required for the Reporter workflow to search historical articles."
+            )
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
+
+        if not self.archivist_api_key:
+            error_msg = (
+                "Configuration error: Archivist API key not configured. "
+                "Set ELASTIC_ARCHIVIST_API_KEY environment variable. "
+                "The Archivist is required for the Reporter workflow to search historical articles."
+            )
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
 
         # Build search query from topic and angle
         topic = assignment.get("topic", "")
         angle = assignment.get("angle", "")
         search_query = f"Find articles about {topic} {angle}".strip()
 
-        logger.info(f"🔍 Connecting to Archivist agent via A2A JSONRPC protocol")
+        logger.info(f"🔍 Calling Archivist via archivist_client module")
         logger.info(f"   Search query: '{search_query}'")
-        logger.info(f"   A2A endpoint: {self._archivist_endpoint}")
-        logger.info(f"   Agent ID: {self._archivist_agent_id}")
 
-        # Create headers with API key (per A2A docs: requires kbn-xsrf header)
-        headers = {
-            "Content-Type": "application/json",
-            "kbn-xsrf": "kibana"
-        }
-
-        if self.archivist_api_key:
-            headers["Authorization"] = f"ApiKey {self.archivist_api_key}"
-            logger.info(f"🔑 Using API key authentication")
-        else:
-            logger.error("❌ ELASTIC_ARCHIVIST_API_KEY not set - Archivist is REQUIRED")
-            raise Exception("Archivist API key not configured - Archivist is REQUIRED for workflow")
-
-        # Generate unique message ID using timestamp and story_id
-        timestamp_ms = int(time.time() * 1000)
-        message_id = f"msg-{timestamp_ms}-{story_id.replace('_', '')[:8]}"
-
-        # Build A2A JSONRPC request (per A2A protocol spec)
-        a2a_request = {
-            "id": message_id,
-            "jsonrpc": "2.0",
-            "method": "message/send",
-            "params": {
-                "configuration": {
-                    "acceptedOutputModes": [
-                        "text/plain",
-                        "video/mp4"
-                    ]
-                },
-                "message": {
-                    "kind": "message",
-                    "messageId": message_id,
-                    "metadata": {},
-                    "parts": [
-                        {
-                            "kind": "text",
-                            "text": search_query
-                        }
-                    ],
-                    "role": "user"
-                }
-            }
-        }
-
-        logger.info(f"📨 Sending A2A JSONRPC request:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Message ID: {message_id}")
-        logger.info(f"   Search query: {search_query}")
-
-        # Retry logic: up to 3 attempts with 60-second timeout each
-        max_attempts = 3
-        timeout_seconds = 60
-        
-        for attempt in range(1, max_attempts + 1):
-            try:
-                logger.info(f"🔄 Archivist attempt {attempt}/{max_attempts} (timeout: {timeout_seconds}s)")
-                start_time = time.time()
-
-                async with httpx.AsyncClient(timeout=timeout_seconds) as http_client:
-                    logger.info(f"⏳ Waiting for Archivist A2A response...")
-
-                    response = await http_client.post(
-                        self._archivist_endpoint,
-                        json=a2a_request,
-                        headers=headers
-                    )
-
-                    elapsed = time.time() - start_time
-                    logger.info(f"📥 Received response in {elapsed:.1f} seconds")
-                    logger.info(f"   Status Code: {response.status_code}")
-
-                    response.raise_for_status()
-                    result = response.json()
-
-                    # Check if response is empty
-                    response_text = response.text.strip()
-                    if not response_text or response_text == '""' or response_text == "":
-                        if attempt < max_attempts:
-                            logger.warning(f"⚠️  Archivist returned empty response on attempt {attempt} - retrying...")
-                            continue
-                        else:
-                            logger.error(f"❌ Archivist returned empty response after {max_attempts} attempts - REQUIRED component failed")
-                            raise Exception(f"Archivist returned empty response after {max_attempts} attempts - Archivist is REQUIRED")
-
-                    # Extract text response from A2A JSONRPC response
-                    # Response structure: {"jsonrpc": "2.0", "id": "msg-...", "result": {...}}
-                    if "error" in result:
-                        error_msg = result.get("error", {}).get("message", "Unknown error")
-                        logger.error(f"❌ Archivist returned A2A error: {error_msg}")
-                        if attempt < max_attempts:
-                            logger.info(f"🔄 Retrying after A2A error...")
-                            continue
-                        else:
-                            raise Exception(f"Archivist A2A error after {max_attempts} attempts: {error_msg}")
-
-                    a2a_result = result.get("result", {})
-
-                    # Extract the message parts from A2A response
-                    full_response = ""
-                    articles = []
-
-                    message = a2a_result.get("message", {})
-                    parts = message.get("parts", [])
-
-                    for part in parts:
-                        if part.get("kind") == "text":
-                            text_content = part.get("text", "")
-                            if text_content:
-                                full_response += text_content + "\n\n"
-
-                    # Log the results
-                    logger.info(f"")
-                    logger.info(f"📚 ARCHIVIST A2A SEARCH RESULTS (Attempt {attempt}):")
-                    logger.info(f"   🔍 Search Query: {search_query}")
-                    logger.info(f"   📨 Message ID: {message_id}")
-                    logger.info(f"   📝 Response length: {len(full_response)} characters")
-                    logger.info(f"   Preview: {full_response[:200]}...")
-                    logger.info(f"")
-
-                    # Success! Return the result
-                    logger.info(f"✅ Archivist succeeded on attempt {attempt}")
-                    return {
-                        "status": "success",
-                        "query": search_query,
-                        "response": full_response.strip(),
-                        "message_id": message_id,
-                        "articles": []  # A2A format may not return structured articles
-                    }
-
-            except httpx.TimeoutException as e:
-                elapsed = time.time() - start_time if 'start_time' in locals() else 0
-                logger.warning(f"⚠️  Archivist attempt {attempt} timed out after {elapsed:.1f} seconds: {e}")
-                
-                if attempt < max_attempts:
-                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
-                    continue
-                else:
-                    logger.error(f"❌ Archivist timed out after {max_attempts} attempts - REQUIRED component failed")
-                    raise Exception(f"Archivist timed out after {max_attempts} attempts - Archivist is REQUIRED")
-
-            except Exception as e:
-                elapsed = time.time() - start_time if 'start_time' in locals() else 0
-                logger.warning(f"⚠️  Archivist attempt {attempt} failed after {elapsed:.1f} seconds: {e}")
-                
-                if attempt < max_attempts:
-                    logger.info(f"🔄 Retrying Archivist call (attempt {attempt + 1}/{max_attempts})...")
-                    continue
-                else:
-                    logger.error(f"❌ Archivist failed after {max_attempts} attempts - REQUIRED component failed")
-                    raise Exception(f"Archivist failed after {max_attempts} attempts: {str(e)} - Archivist is REQUIRED")
+        # Call the archivist client using converse() endpoint (simpler, recommended)
+        # Alternative: use send_task() for A2A JSONRPC protocol
+        try:
+            result = await converse(
+                query=search_query,
+                story_id=story_id,
+                agent_url=self.archivist_agent_url,  # Direct endpoint
+                api_key=self.archivist_api_key,
+                max_retries=10
+            )
+            return result
+        except Exception as e:
+            logger.error(f"❌ Archivist call failed: {e}")
+            raise
 
     async def _generate_article(self, assignment: Dict[str, Any], outline: str = "", research_results: Optional[List[Dict[str, Any]]] = None, archive_results: Optional[List[Dict[str, Any]]] = None) -> str:
-        """Generate article content using Anthropic Claude with research data"""
+        """Generate article content using MCP generate_article tool"""
         topic = assignment.get("topic", "Unknown Topic")
         angle = assignment.get("angle", "")
         target_length = assignment.get("target_length", 1000)
-        priority = assignment.get("priority", "normal")
 
-        # Build research context
-        research_context = ""
-        if research_results:
-            research_context = "\n\nRESEARCH DATA (integrate this factual information into your article):\n"
-            for i, result in enumerate(research_results, 1):
-                research_context += f"\nQuestion {i}: {result.get('question')}\n"
-                research_context += f"Summary: {result.get('summary', 'N/A')}\n"
-                research_context += "Facts:\n"
-                for fact in result.get('facts', []):
-                    research_context += f"  - {fact}\n"
+        # Convert research results to string for MCP tool
+        research_data = json.dumps(research_results) if research_results else ""
 
-                figures = result.get('figures', {})
-                if any(figures.values()):
-                    research_context += "Key Figures:\n"
-                    if figures.get('percentages'):
-                        research_context += f"  Percentages: {', '.join(figures['percentages'])}\n"
-                    if figures.get('dollar_amounts'):
-                        research_context += f"  Dollar Amounts: {', '.join(figures['dollar_amounts'])}\n"
-                    if figures.get('companies'):
-                        research_context += f"  Companies: {', '.join(figures['companies'])}\n"
-
-        # Build archive context
+        # Convert archive results to string for MCP tool
         archive_context = ""
         if archive_results:
-            # archive_results could be a list of articles or a text response
             if isinstance(archive_results, list) and len(archive_results) > 0:
-                archive_context = "\n\nHISTORICAL COVERAGE (reference for context, avoid repeating these angles):\n"
-                for i, article in enumerate(archive_results[:5], 1):  # Limit to 5 articles
-                    archive_context += f"\n{i}. {article}\n"
+                archive_context = "\n".join([f"{i}. {article}" for i, article in enumerate(archive_results[:5], 1)])
             elif isinstance(archive_results, str):
-                archive_context = f"\n\nHISTORICAL COVERAGE:\n{archive_results}\n"
+                archive_context = archive_results
 
-        # Build prompt
-        prompt = f"""You are a professional journalist for Elastic News, a technology news publication.
+        try:
+            logger.info(f"🔧 Calling MCP generate_article tool...")
 
-Write a news article with the following specifications:
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-Topic: {topic}
-{f"Angle/Focus: {angle}" if angle else ""}
-Target Length: approximately {target_length} words
-Priority: {priority}
-{f"Outline: {outline}" if outline else ""}
-{research_context}
-{archive_context}
+            result = await self.mcp_client.call_tool(
+                tool_name="generate_article",
+                arguments={
+                    "topic": topic,
+                    "angle": angle,
+                    "target_length": target_length,
+                    "outline": outline,
+                    "research_data": research_data,
+                    "archive_context": archive_context
+                }
+            )
 
-Write a well-structured news article with:
-- A compelling headline
-- A clear and engaging introduction (lede paragraph)
-- 2-3 body paragraphs with supporting details and context
-- Integrate the research data naturally into the article
-- Use specific statistics, percentages, and company names from the research
-- If historical coverage is provided, reference it for context but take a fresh angle
-- A brief conclusion
+            logger.info(f"✅ Article generated: {len(str(result).split())} words")
+            return result
 
-Style Guidelines:
-- Professional and informative tone
-- Balanced and objective reporting
-- Clear and concise language
-- Focus on facts and insights
-- Cite data points naturally (e.g., "According to recent industry data, 65% of...")
-- Avoid repeating angles from historical coverage - bring a new perspective
-
-Format your response as:
-HEADLINE: [Your headline here]
-
-[Article body paragraphs]"""
-
-        # Use Anthropic helper with fallback to mock
-        fallback = lambda: self._generate_mock_article(topic, angle, target_length)
-        result = await self._call_anthropic(prompt, max_tokens=2000, fallback=fallback)
-        return result if result else fallback()
+        except Exception as e:
+            logger.error(f"❌ MCP generate_article tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP generate_article tool failed: {e}")
 
     def _generate_mock_article(self, topic: str, angle: str, target_length: int) -> str:
         """Generate a simple mock article when Anthropic API is not available"""
@@ -824,13 +670,13 @@ Further updates will be provided as more information becomes available. Stakehol
             logger.info(f"✅ Draft updated successfully")
             logger.info(f"   Word count: {old_word_count} → {draft['word_count']}")
 
-            # Submit revised draft back to News Chief for workflow management
-            logger.info("📤 Submitting revised draft to News Chief...")
-            news_chief_response = await self._submit_draft_to_news_chief(story_id, draft)
+            # Send finalized article to Publisher (Step 17 in workflow)
+            logger.info("📤 Sending article to Publisher...")
+            publisher_response = await self._send_to_publisher(story_id, draft)
 
             response = {
                 "status": "success",
-                "message": "Editorial suggestions applied successfully",
+                "message": "Editorial suggestions applied and article published",
                 "story_id": story_id,
                 "old_word_count": old_word_count,
                 "new_word_count": draft["word_count"],
@@ -838,13 +684,13 @@ Further updates will be provided as more information becomes available. Stakehol
                 "preview": revised_content[:200] + "..." if len(revised_content) > 200 else revised_content
             }
 
-            # Include News Chief response
-            if news_chief_response.get("status") == "success":
-                response["news_chief_response"] = news_chief_response
-                logger.info(f"✅ Revised draft submitted to News Chief successfully")
+            # Include Publisher response
+            if publisher_response.get("status") == "success":
+                response["publisher_response"] = publisher_response
+                logger.info(f"✅ Article published successfully")
             else:
-                response["news_chief_error"] = news_chief_response.get("message")
-                logger.warning(f"⚠️  News Chief submission failed: {news_chief_response.get('message')}")
+                response["publisher_error"] = publisher_response.get("message")
+                logger.warning(f"⚠️  Publishing failed: {publisher_response.get('message')}")
 
             return response
 
@@ -852,39 +698,92 @@ Further updates will be provided as more information becomes available. Stakehol
             logger.error(f"❌ Error applying edits: {e}", exc_info=True)
             return self._error_response(f"Failed to apply edits: {str(e)}", story_id=story_id)
 
+    async def _send_to_publisher(self, story_id: str, draft: Dict[str, Any]) -> Dict[str, Any]:
+        """Send finalized article to Publisher for indexing and storage"""
+        try:
+            logger.info("📰 Preparing article for publication...")
+
+            assignment = draft.get("assignment", {})
+
+            # Build article data for Publisher
+            article_data = {
+                "story_id": story_id,
+                "headline": draft.get("headline", assignment.get("topic")),
+                "content": draft.get("content"),
+                "topic": assignment.get("topic"),
+                "angle": assignment.get("angle"),
+                "word_count": draft.get("word_count"),
+                "target_length": assignment.get("target_length"),
+                "priority": assignment.get("priority", "normal"),
+                "created_at": assignment.get("created_at"),
+                "published_at": datetime.now().isoformat(),
+                "author": "Reporter Agent",
+                "editor": "Editor Agent",
+                "research_questions": self.research_data.get(story_id, {}).get("questions", []),
+                "research_data": self.research_data.get(story_id, {}).get("results", []),
+                "editorial_review": self.editor_reviews.get(story_id),
+                "archive_references": self.archive_data.get(story_id, {}).get("results", []),
+                "version": 1,
+                "revisions_count": draft.get("revisions_applied", 0),
+                "agents_involved": ["News Chief", "Reporter", "Researcher", "Archivist", "Editor", "Publisher"]
+            }
+
+            async with httpx.AsyncClient(timeout=120.0) as http_client:
+                # Create A2A client for Publisher
+                publisher_client, _ = await self._create_a2a_client(
+                    http_client,
+                    self.publisher_url,
+                    "Publisher"
+                )
+
+                # Send publish request
+                request = {
+                    "action": "publish_article",
+                    "article": article_data
+                }
+
+                message = create_text_message_object(content=json.dumps(request))
+                logger.info("📤 Sending article to Publisher...")
+
+                result = await self._parse_a2a_response(publisher_client, message)
+
+                if result:
+                    logger.info(f"✅ Publisher response received")
+                    logger.info(f"   Status: {result.get('status')}")
+                    return result
+
+                return self._error_response("No response from Publisher")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to send to Publisher: {e}", exc_info=True)
+            return self._error_response(f"Failed to contact Publisher: {str(e)}")
+
     async def _integrate_edits(self, original_content: str, review: Dict[str, Any]) -> str:
-        """Integrate editorial suggestions into the article using Anthropic"""
+        """Integrate editorial suggestions into the article using MCP apply_edits tool"""
         suggested_edits = review.get("suggested_edits", [])
-        overall_assessment = review.get("overall_assessment", "")
-        editor_notes = review.get("editor_notes", "")
 
-        # Build prompt for applying edits
-        prompt = f"""You are a reporter for Elastic News revising your article based on editorial feedback.
+        try:
+            logger.info(f"🔧 Calling MCP apply_edits tool...")
 
-ORIGINAL ARTICLE:
-{original_content}
+            # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
+            if self.mcp_client is None:
+                self._init_mcp_client()
 
-EDITORIAL REVIEW:
-{overall_assessment}
+            result = await self.mcp_client.call_tool(
+                tool_name="apply_edits",
+                arguments={
+                    "original_content": original_content,
+                    "suggested_edits": json.dumps(suggested_edits)
+                }
+            )
 
-SUGGESTED EDITS:
-{json.dumps(suggested_edits, indent=2)}
+            logger.info(f"✅ Edits applied: {len(str(result).split())} words")
+            return result
 
-EDITOR'S NOTES:
-{editor_notes}
-
-Please revise the article by applying ALL the suggested edits. Make sure to:
-1. Fix all grammar, spelling, and punctuation issues
-2. Adjust tone where needed to maintain professionalism
-3. Ensure consistency in terminology and style
-4. Adjust length if needed to meet target requirements
-
-Provide ONLY the revised article text, maintaining the same format (headline followed by body). Do not include any explanations or notes."""
-
-        # Use Anthropic helper with fallback to simple edits
-        fallback = lambda: self._apply_simple_edits(original_content, suggested_edits)
-        result = await self._call_anthropic(prompt, max_tokens=3000, fallback=fallback)
-        return result if result else fallback()
+        except Exception as e:
+            logger.error(f"❌ MCP apply_edits tool failed: {e}", exc_info=True)
+            # MCP server is required - re-raise the exception
+            raise Exception(f"MCP apply_edits tool failed: {e}")
 
     def _apply_simple_edits(self, content: str, suggested_edits: List[Dict[str, Any]]) -> str:
         """Apply simple text replacements when Anthropic is not available"""
@@ -976,11 +875,12 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Writes news articles based on story assignments and submits drafts to News Chief for workflow management",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         documentation_url="https://github.com/elastic/elastic-news/blob/main/docs/reporter-agent.md",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=10
         ),

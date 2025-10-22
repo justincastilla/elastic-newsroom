@@ -1,3 +1,4 @@
+.DS_Store
 articles/*.md
 newsroom.log
 reporter.log
@@ -13,3 +14,4 @@ CLAUDE.md
 # Agent logs and PIDs
 logs/
 .newsroom_pids
+.env-hosted

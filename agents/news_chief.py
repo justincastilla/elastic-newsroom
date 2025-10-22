@@ -21,7 +21,7 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 from a2a.utils import new_agent_text_message
 from a2a.client import create_text_message_object
-from utils import setup_logger, run_agent_server
+from utils import setup_logger, run_agent_server, format_json_for_log
 from agents.base_agent import BaseAgent
 
 # Configure logging using centralized utility
@@ -55,7 +55,7 @@ class NewsChiefAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"') and not query.startswith('{"action": "get_story_status"') and not query.startswith('{"action": "list_active_stories"'):
-                logger.info(f"📥 Received query: {query[:200]}...")
+                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "assign_story", "story": {"topic": query}}
@@ -655,10 +655,11 @@ def create_agent_card(host: str, port: int) -> AgentCard:
         description="Coordinates newsroom workflow and assigns stories to specialized agents",
         url=f"http://{host}:{port}",
         version="1.0.0",
+        protocol_version="0.3.0",  # A2A Protocol version
         preferred_transport="JSONRPC",
         capabilities=AgentCapabilities(
             streaming=False,
-            push_notifications=True,
+            push_notifications=False,  # Not implemented yet
             state_transition_history=True,
             max_concurrent_tasks=50
         ),

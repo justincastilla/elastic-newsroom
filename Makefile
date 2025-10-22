@@ -1,4 +1,4 @@
-.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-verbose install clean start stop
+.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose install clean start start-logs stop logs logs-color
 
 # Default target
 help:
@@ -12,18 +12,21 @@ help:
 	@echo "  make test-unit         - Run only unit tests"
 	@echo "  make test-integration  - Run integration tests"
 	@echo "  make test-workflow     - Run full workflow test"
+	@echo "  make test-archivist    - Run Archivist A2A integration tests"
 	@echo "  make test-verbose      - Run tests with verbose output"
 	@echo "  make test-coverage     - Run tests with coverage report"
 	@echo ""
 	@echo "Development:"
 	@echo "  make install           - Install dependencies"
 	@echo "  make start             - Start all agents"
+	@echo "  make start-logs        - Start agents + UI + show colorized logs"
 	@echo "  make start-ui          - Start agents + React UI"
 	@echo "  make stop              - Stop all agents"
 	@echo "  make clean             - Clean up generated files"
 	@echo ""
 	@echo "Agent Management:"
-	@echo "  make logs              - View all agent logs"
+	@echo "  make logs              - View all agent logs (plain)"
+	@echo "  make logs-color        - View colorized agent logs (recommended)"
 	@echo "  make status            - Check agent health"
 
 # Testing targets
@@ -49,6 +52,10 @@ test-workflow:
 	@echo "🧪 Running workflow tests..."
 	pytest -v -m workflow tests/test_workflow_pytest.py
 
+test-archivist:
+	@echo "🧪 Running Archivist A2A integration tests..."
+	pytest -v tests/test_archivist_a2a.py
+
 test-verbose:
 	@echo "🧪 Running tests with verbose output..."
 	pytest -vv -s
@@ -66,6 +73,13 @@ install:
 start:
 	@echo "🚀 Starting all agents..."
 	./scripts/start_newsroom.sh --reload
+
+start-logs:
+	@echo "🚀 Starting all agents + UI with colorized logs..."
+	@./scripts/start_newsroom.sh --with-ui --reload
+	@sleep 3
+	@echo ""
+	@python scripts/view_logs.py
 
 start-ui:
 	@echo "🚀 Starting agents + React UI..."
@@ -88,6 +102,9 @@ clean:
 logs:
 	@echo "📋 Viewing agent logs (Ctrl+C to stop)..."
 	tail -f logs/*.log
+
+logs-color:
+	@python scripts/view_logs.py
 
 status:
 	@echo "🔍 Checking agent health..."

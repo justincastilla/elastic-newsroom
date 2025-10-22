@@ -2,7 +2,7 @@
 Utilities for Elastic News
 """
 
-from .logging import setup_logger, setup_ui_logger
+from .logging import setup_logger, setup_ui_logger, format_json_for_log, truncate_text
 from .env_loader import load_env_config
 from .anthropic_client import init_anthropic_client
 from .json_utils import extract_json_from_llm_response
@@ -11,6 +11,8 @@ from .server_utils import run_agent_server
 __all__ = [
     'setup_logger',
     'setup_ui_logger',
+    'format_json_for_log',
+    'truncate_text',
     'load_env_config',
     'init_anthropic_client',
     'extract_json_from_llm_response',

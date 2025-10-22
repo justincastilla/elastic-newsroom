@@ -24,15 +24,31 @@ NC='\033[0m' # No Color
 LOG_DIR="logs"
 PID_FILE=".newsroom_pids"
 
+# Port configuration (centralized)
+PORT_MCP_SERVER=8095
+PORT_EVENT_HUB=8090
+PORT_ARTICLE_API=8085
+PORT_NEWS_CHIEF=8080
+PORT_REPORTER=8081
+PORT_EDITOR=8082
+PORT_RESEARCHER=8083
+PORT_PUBLISHER=8084
+PORT_UI_MESOP=3000
+PORT_UI_REACT=3001
+
+# All ports array (for iteration in loops)
+ALL_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER $PORT_UI_MESOP $PORT_UI_REACT)
+
 # Agent configurations: name:port:module
 AGENTS=(
-    "Event Hub:8090:services.event_hub:app"
-    "Article API:8085:services.article_api:app"
-    "News Chief:8080:agents.news_chief:app"
-    "Reporter:8081:agents.reporter:app"
-    "Editor:8082:agents.editor:app"
-    "Researcher:8083:agents.researcher:app"
-    "Publisher:8084:agents.publisher:app"
+    "MCP Server:${PORT_MCP_SERVER}:mcp_servers.newsroom_http_server:app"
+    "Event Hub:${PORT_EVENT_HUB}:services.event_hub:app"
+    "Article API:${PORT_ARTICLE_API}:services.article_api:app"
+    "News Chief:${PORT_NEWS_CHIEF}:agents.news_chief:app"
+    "Reporter:${PORT_REPORTER}:agents.reporter:app"
+    "Editor:${PORT_EDITOR}:agents.editor:app"
+    "Researcher:${PORT_RESEARCHER}:agents.researcher:app"
+    "Publisher:${PORT_PUBLISHER}:agents.publisher:app"
 )
 
 # Parse command line arguments
@@ -53,32 +69,68 @@ if [ "$1" == "--stop" ]; then
     echo -e "${YELLOW}🛑 Stopping all newsroom agents...${NC}"
     echo ""
 
-    # Stop using PID file first
+    # Kill all uvicorn processes related to our agents
+    echo -e "${YELLOW}   Killing all uvicorn agent processes...${NC}"
+    pkill -9 -f "uvicorn agents" 2>/dev/null || true
+    pkill -9 -f "uvicorn services" 2>/dev/null || true
+    pkill -9 -f "uvicorn mcp_servers" 2>/dev/null || true
+
+    # Kill any remaining Python processes running our modules
+    pkill -9 -f "agents.news_chief" 2>/dev/null || true
+    pkill -9 -f "agents.reporter" 2>/dev/null || true
+    pkill -9 -f "agents.editor" 2>/dev/null || true
+    pkill -9 -f "agents.researcher" 2>/dev/null || true
+    pkill -9 -f "agents.publisher" 2>/dev/null || true
+    pkill -9 -f "services.event_hub" 2>/dev/null || true
+    pkill -9 -f "services.article_api" 2>/dev/null || true
+    pkill -9 -f "mcp_servers.newsroom_tools" 2>/dev/null || true
+
+    # Stop using PID file
     if [ -f "$PID_FILE" ]; then
         while IFS= read -r line; do
             NAME=$(echo "$line" | cut -d: -f1)
             PID=$(echo "$line" | cut -d: -f2)
 
             if ps -p "$PID" > /dev/null 2>&1; then
-                echo -e "${YELLOW}   Stopping $NAME (PID: $PID)...${NC}"
-                kill "$PID" 2>/dev/null || true
+                echo -e "${YELLOW}   Stopping $NAME (PID: $PID) and all children...${NC}"
+                # Kill the process and all its children
+                pkill -9 -P "$PID" 2>/dev/null || true
+                kill -9 "$PID" 2>/dev/null || true
             fi
         done < "$PID_FILE"
         rm "$PID_FILE"
     fi
 
-    # Also kill any processes still bound to the ports (including Event Hub, Article API and UI ports)
-    echo -e "${YELLOW}   Checking for processes on ports 8080-8085, 8090, 3000...${NC}"
-    for port in 8080 8081 8082 8083 8084 8085 8090 3000; do
-        PID=$(lsof -ti:$port 2>/dev/null)
-        if [ -n "$PID" ]; then
-            echo -e "${YELLOW}   Killing process on port $port (PID: $PID)...${NC}"
-            kill -9 "$PID" 2>/dev/null || true
+    # Force kill any processes still bound to the ports (including MCP Server, Event Hub, Article API and UI ports)
+    echo -e "${YELLOW}   Force killing any remaining processes on ports...${NC}"
+    for port in "${ALL_PORTS[@]}"; do
+        PIDS=$(lsof -ti:$port 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            for PID in $PIDS; do
+                echo -e "${YELLOW}   Force killing process on port $port (PID: $PID)...${NC}"
+                kill -9 "$PID" 2>/dev/null || true
+            done
+        fi
+    done
+
+    # Give it a moment to clean up
+    sleep 1
+
+    # Final verification - check if any ports are still in use
+    STILL_IN_USE=""
+    for port in "${ALL_PORTS[@]}"; do
+        if lsof -ti:$port > /dev/null 2>&1; then
+            STILL_IN_USE="$STILL_IN_USE $port"
         fi
     done
 
     echo ""
-    echo -e "${GREEN}✅ All agents stopped${NC}"
+    if [ -n "$STILL_IN_USE" ]; then
+        echo -e "${RED}⚠️  Warning: Some ports still in use:$STILL_IN_USE${NC}"
+        echo -e "${YELLOW}   You may need to manually kill these processes${NC}"
+    else
+        echo -e "${GREEN}✅ All agents stopped successfully${NC}"
+    fi
     exit 0
 fi
 
@@ -88,7 +140,9 @@ mkdir -p "$LOG_DIR"
 # Check if any ports are already in use
 echo -e "${BLUE}🔍 Checking for port conflicts...${NC}"
 PORTS_IN_USE=""
-for port in 8080 8081 8082 8083 8084 8085 8090; do
+# Check agent ports only (exclude UI ports for this check)
+AGENT_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER)
+for port in "${AGENT_PORTS[@]}"; do
     if lsof -ti:$port > /dev/null 2>&1; then
         PORTS_IN_USE="$PORTS_IN_USE $port"
     fi
@@ -117,7 +171,7 @@ start_agent() {
 
     echo -e "${YELLOW}🚀 Starting $NAME on port $PORT...${NC}"
 
-    # Start uvicorn directly with the module
+    # Start uvicorn with the module
     if [ -n "$RELOAD_FLAG" ]; then
         uvicorn "$MODULE" --host localhost --port "$PORT" $RELOAD_FLAG > "$LOG_FILE" 2>&1 &
     else
@@ -162,6 +216,7 @@ if [ $FAILED -eq 0 ]; then
     echo -e "${GREEN}✅ All agents started successfully!${NC}"
     echo ""
     echo -e "${BLUE}📊 Agent Endpoints:${NC}"
+    echo -e "${BLUE}   MCP Server:  http://localhost:8095 (Tool Provider)${NC}"
     echo -e "${BLUE}   Event Hub:   http://localhost:8090${NC}"
     echo -e "${BLUE}   Article API: http://localhost:8085${NC}"
     echo -e "${BLUE}   News Chief:  http://localhost:8080${NC}"
