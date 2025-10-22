@@ -256,10 +256,14 @@ class ReporterAgent(BaseAgent):
 
                 # Process Archivist response - REQUIRED, stop workflow if it fails
                 if isinstance(archive_response, Exception):
-                    logger.error(f"❌ CRITICAL: Archivist failed - this is a REQUIRED component")
-                    logger.error(f"   Error: {archive_response}")
+                    error_msg = (
+                        f"Workflow error: Archivist failed with exception. "
+                        f"The Archivist is required for the Reporter workflow. "
+                        f"Error: {archive_response}"
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist failed - this is a REQUIRED component: {archive_response}")
+                    raise Exception(error_msg)
                 elif archive_response.get("status") == "success":
                     archive_results = archive_response.get("articles", [])
                     self.archive_data[story_id] = {
@@ -275,20 +279,33 @@ class ReporterAgent(BaseAgent):
                         data={"articles_found": len(archive_results)}
                     )
                 elif archive_response.get("status") in ["timeout", "error"]:
-                    error_msg = f"Archivist {archive_response.get('status')}: {archive_response.get('error', 'Unknown error')}"
-                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    status = archive_response.get('status')
+                    error_detail = archive_response.get('error', 'Unknown error')
+                    error_msg = (
+                        f"Workflow error: Archivist {status} - {error_detail}. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist {archive_response.get('status')} - this is a REQUIRED component: {archive_response.get('error', 'Unknown error')}")
+                    raise Exception(error_msg)
                 elif archive_response.get("status") == "skipped":
-                    logger.error(f"❌ CRITICAL: Archivist skipped - this is a REQUIRED component")
-                    logger.error(f"   Message: {archive_response.get('message')}")
+                    skip_message = archive_response.get('message', 'No reason provided')
+                    error_msg = (
+                        f"Workflow error: Archivist was skipped - {skip_message}. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist skipped - this is a REQUIRED component: {archive_response.get('message')}")
+                    raise Exception(error_msg)
                 else:
-                    error_msg = f"Archivist returned unexpected status: {archive_response.get('status')}"
-                    logger.error(f"❌ CRITICAL: {error_msg} - Archivist is REQUIRED")
+                    unexpected_status = archive_response.get('status', 'unknown')
+                    error_msg = (
+                        f"Workflow error: Archivist returned unexpected status '{unexpected_status}'. "
+                        f"The Archivist is required for the Reporter workflow to search historical articles."
+                    )
+                    logger.error(f"❌ CRITICAL: {error_msg}")
                     self.archivist_status[story_id] = "error"
-                    raise Exception(f"Archivist returned unexpected status: {archive_response.get('status')} - this is a REQUIRED component")
+                    raise Exception(error_msg)
             else:
                 logger.info("ℹ️  No research questions needed for this article")
 
@@ -412,8 +429,8 @@ class ReporterAgent(BaseAgent):
 
         except Exception as e:
             logger.error(f"❌ MCP generate_outline tool failed: {e}", exc_info=True)
-            # MCP server is required - re-raise the exception
-            raise Exception(f"MCP generate_outline tool failed: {e}")
+            # MCP server is REQUIRED - re-raise with clear message
+            raise
 
     async def _send_to_researcher(self, story_id: str, assignment: Dict[str, Any], questions: List[str]) -> Dict[str, Any]:
         """Send research questions to Researcher agent via A2A"""
@@ -454,15 +471,30 @@ class ReporterAgent(BaseAgent):
             return self._error_response(f"Failed to contact Researcher: {str(e)}")
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
-        """Search for historical articles via Archivist agent using the archivist_client module"""
-        # Check if Archivist is configured
+        """
+        Search for historical articles via Archivist agent using the archivist_client module.
+
+        Raises:
+            Exception: If Archivist configuration is missing (URL or API key)
+        """
+        # Validate Archivist configuration (required for workflow)
         if not self.archivist_agent_url and not self.archivist_card_url:
-            logger.error("❌ Neither ELASTIC_ARCHIVIST_AGENT_URL nor ELASTIC_ARCHIVIST_AGENT_CARD_URL is set - Archivist is REQUIRED")
-            raise Exception("Archivist URL not configured - Archivist is REQUIRED for workflow")
+            error_msg = (
+                "Configuration error: Archivist URL not configured. "
+                "Set ELASTIC_ARCHIVIST_AGENT_URL or ELASTIC_ARCHIVIST_AGENT_CARD_URL environment variable. "
+                "The Archivist is required for the Reporter workflow to search historical articles."
+            )
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
 
         if not self.archivist_api_key:
-            logger.error("❌ ELASTIC_ARCHIVIST_API_KEY not set - Archivist is REQUIRED")
-            raise Exception("Archivist API key not configured - Archivist is REQUIRED for workflow")
+            error_msg = (
+                "Configuration error: Archivist API key not configured. "
+                "Set ELASTIC_ARCHIVIST_API_KEY environment variable. "
+                "The Archivist is required for the Reporter workflow to search historical articles."
+            )
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
 
         # Build search query from topic and angle
         topic = assignment.get("topic", "")

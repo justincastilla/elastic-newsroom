@@ -16,7 +16,17 @@ from anthropic import Anthropic
 
 
 class MCPClient:
-    """Client for interacting with MCP servers"""
+    """
+    Client for interacting with MCP servers.
+
+    The MCP client provides two modes of operation:
+    1. Direct tool calling via call_tool() - works without Anthropic client
+    2. LLM-based tool selection via select_and_call_tool() - requires Anthropic client
+
+    This design allows the MCP client to be used in environments where LLM access
+    is not available or desired, while still supporting intelligent tool selection
+    when an LLM is available.
+    """
 
     def __init__(self, mcp_server_url: str, anthropic_client: Optional[Anthropic] = None, logger=None, agent_name: Optional[str] = None):
         """
@@ -24,7 +34,9 @@ class MCPClient:
 
         Args:
             mcp_server_url: URL of the MCP server (e.g., http://localhost:8095)
-            anthropic_client: Optional Anthropic client for tool selection
+            anthropic_client: Optional Anthropic client for LLM-based tool selection.
+                             If not provided, select_and_call_tool() will raise an exception,
+                             but call_tool() will still work.
             logger: Optional logger instance
             agent_name: Optional name of the agent using this client (for logging)
         """
@@ -81,10 +93,21 @@ class MCPClient:
 
                 return tools
 
+        except httpx.ConnectError as e:
+            if self.logger:
+                self.logger.error(f"❌ Cannot connect to MCP server at {self.mcp_server_url}")
+            raise Exception(
+                f"Configuration error: MCP server not running at {self.mcp_server_url}. "
+                f"The MCP server is REQUIRED for all agent operations. "
+                f"Start it with: python -m mcp_servers.newsroom_http_server"
+            )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ Failed to list MCP tools: {e}")
-            raise Exception(f"MCP server not available at {self.mcp_server_url}: {e}")
+            raise Exception(
+                f"Runtime error: MCP server error at {self.mcp_server_url} - {e}. "
+                f"The MCP server is REQUIRED for all agent operations."
+            )
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         """
@@ -124,17 +147,31 @@ class MCPClient:
 
                 return tool_result
 
+        except httpx.ConnectError as e:
+            if self.logger:
+                self.logger.error(f"❌ Cannot connect to MCP server at {self.mcp_server_url}")
+            raise Exception(
+                f"Configuration error: MCP server not running at {self.mcp_server_url}. "
+                f"The MCP server is REQUIRED for all agent operations. "
+                f"Start it with: python -m mcp_servers.newsroom_http_server"
+            )
         except Exception as e:
             if self.logger:
                 self.logger.error(f"❌ MCP tool call failed: {e}")
                 # Try to get the actual error response
                 if hasattr(e, 'response') and hasattr(e.response, 'text'):
                     self.logger.error(f"   Server response: {e.response.text}")
-            raise Exception(f"MCP tool {tool_name} failed: {e}")
+            raise Exception(
+                f"Runtime error: MCP tool '{tool_name}' failed - {e}. "
+                f"The MCP server is REQUIRED for all agent operations."
+            )
 
     async def select_and_call_tool(self, task_description: str, context: Dict[str, Any]) -> Any:
         """
         Use LLM to select appropriate tool and call it.
+
+        This method requires an Anthropic client for LLM-based tool selection.
+        If you don't have an Anthropic client, use call_tool() directly instead.
 
         Args:
             task_description: Description of what needs to be done
@@ -142,9 +179,15 @@ class MCPClient:
 
         Returns:
             Tool result
+
+        Raises:
+            Exception: If Anthropic client is not available
         """
         if not self.anthropic_client:
-            raise Exception("Anthropic client required for LLM-based tool selection")
+            raise Exception(
+                "Anthropic client required for LLM-based tool selection. "
+                "Use call_tool() directly if you don't have an Anthropic client."
+            )
 
         # Get available tools
         tools = await self.list_tools()

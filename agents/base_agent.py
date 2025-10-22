@@ -188,17 +188,45 @@ class BaseAgent:
         """
         Initialize MCP client if not already initialized.
 
+        The MCP server is REQUIRED for all agent operations. If the MCP server
+        is not running or not configured, this will raise an exception with
+        clear instructions on how to fix it.
+
+        The MCP client can work with or without an Anthropic client:
+        - With Anthropic: Supports LLM-based tool selection via select_and_call_tool()
+        - Without Anthropic: Can still call tools directly via call_tool()
+
         Returns:
-            MCP client instance or None if initialization fails
+            MCP client instance
+
+        Raises:
+            Exception: If MCP server is not configured or not accessible
         """
         if self.mcp_client is None:
-            try:
-                # Initialize Anthropic client first (needed for tool selection)
-                if self.anthropic_client is None:
-                    self._init_anthropic_client()
+            # Check if MCP server URL is configured
+            mcp_server_url = os.getenv("MCP_SERVER_URL")
+            if not mcp_server_url:
+                error_msg = (
+                    "Configuration error: MCP server URL not configured. "
+                    "Set MCP_SERVER_URL environment variable (e.g., http://localhost:8095). "
+                    "The MCP server is REQUIRED for all agent operations."
+                )
+                self.logger.error(f"❌ {error_msg}")
+                raise Exception(error_msg)
 
+            try:
                 # Extract agent name from logger
                 agent_name = self.logger.name if hasattr(self.logger, 'name') else "UNKNOWN"
+
+                # Initialize Anthropic client for optional LLM-based tool selection
+                if self.anthropic_client is None:
+                    try:
+                        self._init_anthropic_client()
+                    except Exception as e:
+                        self.logger.warning(
+                            f"⚠️  Anthropic client not available for MCP tool selection: {e}\n"
+                            f"   MCP tools can still be called directly, but LLM-based tool selection is disabled."
+                        )
 
                 self.mcp_client = create_mcp_client(
                     logger=self.logger,
@@ -207,8 +235,13 @@ class BaseAgent:
                 )
                 self.logger.info("✅ MCP client initialized")
             except Exception as e:
-                self.logger.error(f"❌ Failed to initialize MCP client: {e}")
-                raise Exception(f"MCP client initialization failed: {e}")
+                error_msg = (
+                    f"Runtime error: Failed to initialize MCP client - {e}. "
+                    f"Ensure the MCP server is running at {mcp_server_url}. "
+                    f"Start it with: python -m mcp_servers.newsroom_http_server"
+                )
+                self.logger.error(f"❌ {error_msg}")
+                raise Exception(error_msg)
         return self.mcp_client
 
     async def _call_mcp_tool(

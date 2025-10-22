@@ -4,6 +4,7 @@
   "description": "React UI for Elastic News multi-agent workflow",
   "private": true,
   "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "autoprefixer": "^10.4.16",
     "axios": "^1.6.0",
     "lucide-react": "^0.294.0",

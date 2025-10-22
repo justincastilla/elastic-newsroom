@@ -4,6 +4,10 @@ Archivist Client Module
 Provides two methods for calling the Elastic Archivist:
 1. converse() - Uses the /converse endpoint (simpler, recommended)
 2. send_task() - Uses the A2A JSONRPC protocol (/a2a endpoint)
+
+Helper Functions:
+- extract_response_text() - Robust text extraction with logging for unexpected formats
+- prepare_search_query() - Consistent query formatting for both endpoints
 """
 
 import json
@@ -19,6 +23,63 @@ logger = setup_logger("ARCHIVIST_CLIENT")
 # Query configuration
 ARCHIVE_INDEX = "news_archive"
 NO_RESULTS_MESSAGE = "No results found"
+
+
+def extract_response_text(response_data: Any) -> str:
+    """
+    Extract text from Archivist response with robust error handling.
+
+    Handles various response formats:
+    - String: returned as-is
+    - Dict with 'text' field: extracts text value
+    - Dict without 'text': logs warning and serializes to JSON
+    - List: attempts to extract text from items, otherwise serializes
+    - Other types: converts to string with warning
+
+    Args:
+        response_data: Response data from Archivist (any type)
+
+    Returns:
+        Extracted text string, or JSON serialization for unexpected formats
+    """
+    if isinstance(response_data, str):
+        return response_data
+
+    elif isinstance(response_data, dict):
+        # If response is a dict, try to extract text from expected fields
+        if "text" in response_data:
+            return response_data["text"]
+        else:
+            # Log warning about unexpected structure before falling back to JSON serialization
+            logger.warning(
+                f"⚠️  Unexpected response dict structure. Expected 'text' field not found."
+            )
+            logger.warning(f"   Response keys: {list(response_data.keys())}")
+            logger.warning(f"   Full response (truncated): {truncate_text(str(response_data), max_length=200)}")
+            logger.warning(f"   Falling back to JSON serialization.")
+            return json.dumps(response_data, indent=2)
+
+    elif isinstance(response_data, list):
+        # Handle list responses (might be multiple parts)
+        logger.warning(
+            f"⚠️  Response is a list with {len(response_data)} items. "
+            f"Attempting to extract text from parts."
+        )
+        text_parts = []
+        for item in response_data:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                text_parts.append(item["text"])
+        return "\n".join(text_parts) if text_parts else json.dumps(response_data)
+
+    else:
+        # Fallback: convert to string
+        logger.warning(
+            f"⚠️  Unexpected response type: {type(response_data).__name__}. "
+            f"Converting to string."
+        )
+        return str(response_data) if response_data else ""
 
 
 def prepare_search_query(query: str, index: str = ARCHIVE_INDEX, format_type: str = "summary") -> str:
@@ -162,17 +223,10 @@ async def converse(
                 response_data = result.get("response", "")
                 conversation_id = result.get("conversation_id", "")
 
-                # Handle different response types
-                response_text = ""
-                if isinstance(response_data, str):
-                    response_text = response_data
-                elif isinstance(response_data, dict):
-                    # If response is a dict, try to extract text from it
-                    # It might be in a 'text' field or we need to serialize it
-                    response_text = response_data.get("text", json.dumps(response_data))
-                else:
-                    # Fallback: convert to string
-                    response_text = str(response_data) if response_data else ""
+                # Handle different response types with explicit error handling
+                # Expected format: string or dict with 'text' field
+                # Fallback behavior: JSON serialization with warning for debugging
+                response_text = extract_response_text(response_data)
 
                 # Check if we got content
                 if response_text and len(response_text.strip()) > 0:
