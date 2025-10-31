@@ -184,6 +184,12 @@ async def root():
     return {"status": "ok", "service": "Newsroom MCP HTTP Server", "tools_count": len(TOOLS)}
 
 
+@app.get("/health")
+async def health():
+    """Dedicated health check endpoint for Docker and monitoring"""
+    return {"status": "healthy", "service": "Newsroom MCP HTTP Server"}
+
+
 @app.post("/mcp/v1/tools/list", response_model=ToolListResponse)
 async def list_tools():
     """List all available MCP tools"""

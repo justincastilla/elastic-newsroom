@@ -94,6 +94,10 @@ docker-compose logs newsroom-agents | grep ERROR
 # Verify MCP server is healthy
 docker-compose ps
 # Should show "healthy" for newsroom-agents
+
+# Test health endpoint directly
+curl http://localhost:8095/health
+# Should return: {"status": "healthy", "service": "Newsroom MCP HTTP Server"}
 ```
 
 ### UI Can't Connect?

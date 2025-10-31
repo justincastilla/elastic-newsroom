@@ -14,7 +14,7 @@ anthropic>=0.18.0
 elasticsearch>=9.1.1
 
 # Utilities
-python-dotenv==1.0.0
+python-dotenv>=1.1.0  # Required by fastmcp
 loguru==0.7.2
 
 # MCP (Model Context Protocol)

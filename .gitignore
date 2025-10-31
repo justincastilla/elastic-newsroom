@@ -9,7 +9,6 @@ __pycache__/
 .env
 node_modules/
 .vscode/
-CLAUDE.md
 
 # Agent logs and PIDs
 logs/

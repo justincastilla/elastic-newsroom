@@ -50,98 +50,72 @@ The newsroom consists of 5 specialized AI agents that communicate via the A2A pr
 #### External Agent (Elastic Cloud)
 
 - **Archivist Agent**
-  - Hosted on Elastic Cloud (Kibana Agent Builder)
+  - Hosted on Elastic Cloud (Elastic Agent Builder)
   - Searches historical articles via Elastic Conversational API
   - Provides context about past coverage
   - Uses `platform.core.search` skill to query `news_archive` index
   - Returns article highlights, references, and reasoning
 
+> Note: Elastic Agent Builder is enabled by default in serverless Elasticsearch projects. To begin using it, navigate to the Agents section in the navigation menu or search for "Agents" in the global search field within Kibana. 
+
 ## Quick Start
 
-### 1. Install Dependencies
+### Option 1: Docker (Recommended)
+
+**Prerequisites:** Docker Engine 20.10+, Docker Compose 2.0+
+
 ```bash
+# 1. Create environment file
+cp .env.docker .env
+
+# 2. Edit .env with your Anthropic API key
+nano .env  # Add: ANTHROPIC_API_KEY=sk-ant-api03-xxx
+
+# 3. Start all services
+docker-compose up -d
+
+# 4. Access the UI
+open http://localhost:3001
+```
+
+**What's running:**
+- All 5 agents (ports 8080-8084)
+- MCP Server (8095), Event Hub (8090), Article API (8085)
+- React UI (3001)
+
+See [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md) for complete Docker documentation.
+
+### Option 2: Local Development
+
+**Prerequisites:** Python 3.10+, Node.js 18+ (optional for UI)
+
+```bash
+# 1. Configure environment
+cp env.example .env
+# Edit .env with your API keys (see docs/configuration-guide.md)
+
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# Optional: Install React UI dependencies
-cd react-ui && npm install && cd ..
+# 3. Start all services
+make start-ui   # Start agents + React UI with hot reload
+
+# Or start agents only
+make start      # Agents with hot reload
 ```
 
-### 2. Configure Environment
-```bash
-cp env.example .env
-# Edit .env with your credentials:
-# - ANTHROPIC_API_KEY (required)
-# - ELASTICSEARCH_ENDPOINT (required)
-# - ELASTICSEARCH_API_KEY (required)
-# - ELASTIC_ARCHIVIST_AGENT_CARD_URL (required)
-# - ELASTIC_ARCHIVIST_API_KEY (required)
-```
+Access the UI at http://localhost:3001
 
-See [Configuration Guide](docs/configuration-guide.md) for detailed setup instructions.
+### Using the System
 
-### 3. Create Elasticsearch Index
-```bash
-python scripts/create_elasticsearch_index.py
-```
-
-### 4. Start All Agents
-```bash
-# Start all 5 agents in the background
-./scripts/start_newsroom.sh
-
-# Or with hot reload for development
-./scripts/start_newsroom.sh --reload
-
-# Start agents + React UI on port 3001
-./scripts/start_newsroom.sh --with-ui
-
-# Stop all agents (and UI if running)
-./scripts/start_newsroom.sh --stop
-```
-
-**React UI** (if started with `--with-ui`):
-- Start: `cd react-ui && ./start.sh` or `./scripts/start_newsroom.sh --with-ui`
-- Access: http://localhost:3001/
-- Features: Real-time agent monitoring, workflow visualization, live status updates
-
-### 5. Run the Workflow
-
-**Option 1: React UI** (Recommended - Modern Interface)
-```bash
-# Start all agents and React UI
-./scripts/start_newsroom.sh --with-ui
-
-# Or start React UI separately (agents must be running)
-cd react-ui && ./start.sh
-
-# Navigate to http://localhost:3001
-# Fill out the story assignment form
-# Watch real-time agent activity and workflow progress
-# View completed articles with live status updates
-```
-
-**Option 2: Test Script**
-```bash
-# Run with real-time monitoring and detailed output
-python run_live_test.py
-
-# Or run the comprehensive test directly
-python tests/test_newsroom_workflow_comprehensive.py
-```
-
-This will:
-1. Assign a story via News Chief
-2. Have Researcher gather information
-3. Have Reporter write the article (consulting Archivist via Elastic Conversational API)
-4. Have Editor review and refine the article
-5. Have Publisher index to Elasticsearch and save to file
-
-**Option 4: Archivist Diagnostics**
-```bash
-python test_archivist.py
-```
-
-Tests Archivist connectivity and search functionality directly.
+1. **Open UI**: http://localhost:3001
+2. **Create Story**: Fill out the story assignment form
+   - Topic: e.g., "Artificial Intelligence in Healthcare"
+   - Angle: e.g., "Recent breakthroughs"
+   - Target Length: e.g., 1000 words
+3. **Submit**: Click "Assign Story"
+4. **Watch Progress**: Real-time workflow visualization
+5. **View Article**: Click on completed story
 
 ## Project Structure
 
@@ -212,9 +186,12 @@ elastic-news/
 
 ## Documentation
 
-- [Configuration Guide](docs/configuration-guide.md) - Environment setup and API configuration
-- [Elasticsearch Schema](docs/elasticsearch-schema.md) - Index mapping and field definitions
-- [Archivist Integration](docs/archivist-integration.md) - External agent setup
+- [DOCKER_QUICKSTART.md](DOCKER_QUICKSTART.md) - Docker deployment guide
+- [TESTING.md](TESTING.md) - Testing documentation
+- [docs/configuration-guide.md](docs/configuration-guide.md) - Environment setup
+- [docs/architecture.md](docs/architecture.md) - Detailed architecture
+- [docs/archivist-integration.md](docs/archivist-integration.md) - Archivist setup
+- [docs/elasticsearch-schema.md](docs/elasticsearch-schema.md) - Index mapping
 
 ## Workflow Example
 
@@ -243,126 +220,51 @@ Publisher indexes article to Elasticsearch + saves markdown file
 User views completed article in Web UI
 ```
 
-## Commands
+## Common Commands
 
-### Start/Stop Agents
+### Docker
 ```bash
-./scripts/start_newsroom.sh                      # Start all agents
-./scripts/start_newsroom.sh --reload             # Start agents with hot reload
-./scripts/start_newsroom.sh --with-ui            # Start agents + web UI
-./scripts/start_newsroom.sh --with-ui --reload   # Start agents + UI with hot reload
-./scripts/start_newsroom.sh --stop               # Stop all agents and UI
+docker-compose up -d         # Start all services
+docker-compose logs -f       # View logs
+docker-compose ps            # Check status
+docker-compose down          # Stop all services
+docker-compose up -d --build # Rebuild and restart
 ```
 
-### Web UI
+### Local Development
 ```bash
-./start_ui.sh                    # Start Mesop UI only (agents must be running)
-open http://localhost:3000       # Open Mesop UI in browser
+make start           # Start agents with hot reload
+make start-ui        # Start agents + React UI
+make stop            # Stop all services
+make logs-color      # View colorized logs
+make status          # Check agent health
+make test            # Run tests
 ```
 
-### React UI
+See `make help` for all available commands.
+
+### Testing
+
 ```bash
-cd react-ui && ./start.sh        # Start React UI (agents must be running)
-open http://localhost:3001       # Open React UI in browser
-```
-
-**Hot Reload:** React UI has hot reload enabled by default. Changes to `react-ui/` files reload automatically in development mode.
-
-### View Logs
-```bash
-tail -f logs/*.log            # All agents
-tail -f logs/News_Chief.log   # Specific agent
-```
-
-### Run Tests
-
-**Modern Pytest Framework (RECOMMENDED)**
-```bash
-# Run tests with mocks (NO API KEYS NEEDED! ✨)
-make test               # Fast tests with mocks
-pytest tests/test_with_mocks.py -v  # Mock-specific tests
-
-# Run all tests including slow ones (with mocks)
-make test-all
-
-# Run with real services (requires API keys + running agents)
-USE_REAL_SERVICES=true make test
-
-# Run specific test types
-make test-unit          # Unit tests only
-make test-integration   # Integration tests
-make test-workflow      # Full workflow tests
-
-# Run with verbose output
-pytest -v -m "not slow"
-
-# See all commands
-make help
-```
-
-**🎯 Tests use mocks by default** - no Anthropic API key or Elasticsearch required!
-See [tests/mocks/README.md](tests/mocks/README.md) for mock documentation.
-
-**Legacy Test Scripts**
-```bash
-# Simple workflow test script
-./test_workflow.sh
-python tests/test_full_workflow.py
-
-# Comprehensive monitoring test
-python tests/test_newsroom_workflow_comprehensive.py
-
-# Other tests
-python tests/test_elasticsearch_index.py  # Elasticsearch index test
-python tests/test_archivist.py           # Archivist connectivity test
+make test            # Fast tests (no API keys needed!)
+make test-all        # All tests including slow ones
+make test-coverage   # Tests with coverage report
 ```
 
 See [TESTING.md](TESTING.md) for detailed testing documentation.
 
-### Individual Agents
-```bash
-uvicorn agents.news_chief:app --host localhost --port 8080
-uvicorn agents.reporter:app --host localhost --port 8081
-uvicorn agents.researcher:app --host localhost --port 8083
-uvicorn agents.editor:app --host localhost --port 8082
-uvicorn agents.publisher:app --host localhost --port 8084
-```
-
-## Agent Card URLs
-
-Each agent exposes its capabilities via agent card:
-- News Chief: `http://localhost:8080/.well-known/agent-card.json`
-- Reporter: `http://localhost:8081/.well-known/agent-card.json`
-- Editor: `http://localhost:8082/.well-known/agent-card.json`
-- Researcher: `http://localhost:8083/.well-known/agent-card.json`
-- Publisher: `http://localhost:8084/.well-known/agent-card.json`
-
 ## Archivist Integration
 
-The Reporter agent integrates with an Elastic Cloud Archivist agent to search historical articles:
+The Reporter integrates with an Elastic Cloud Archivist agent (created using Agent Builder) to search historical articles via the A2A protocol.
 
-**API Endpoint**: `POST /api/agent_builder/converse`
+**Key Details:**
+- Searches `news_archive` Elasticsearch index
+- Returns historical article highlights and references
+- Created in Elastic Cloud using Agent Builder
 
-**Request Format**:
-```json
-{
-  "input": "Find historical news articles about: {search_query}",
-  "agent_id": "archive-agent"
-}
-```
+For details on creating your own A2A-enabled agent in Elastic and finding your agent card URL, see the [Elastic Agent Builder A2A documentation](https://www.elastic.co/docs/solutions/search/agent-builder/a2a-server).
 
-**Required Headers**:
-- `Authorization: ApiKey {ELASTIC_ARCHIVIST_API_KEY}`
-- `Content-Type: application/json`
-- `kbn-xsrf: true`
-
-**Response**: Multi-step conversational response with:
-- Reasoning steps (agent's thought process)
-- Tool calls (`platform.core.search` on `news_archive` index)
-- Article results with highlights and references
-- Conversation ID for follow-up queries
-
-**Diagnostics**: Run `python test_archivist.py` to verify connectivity and test search functionality.
+See [docs/archivist-integration.md](docs/archivist-integration.md) for complete setup guide.
 
 ## Technology Stack
 

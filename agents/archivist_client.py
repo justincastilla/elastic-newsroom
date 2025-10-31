@@ -1,6 +1,13 @@
 """
 Archivist Client Module
 
+The Archivist is an agent created in Elastic Cloud using Agent Builder and exposed
+via the A2A (Agent-to-Agent) protocol. It searches historical news articles stored
+in the 'news_archive' Elasticsearch index.
+
+For more information about creating A2A-enabled agents in Elastic and finding your
+agent card URL, see: https://www.elastic.co/docs/solutions/search/agent-builder/a2a-server
+
 Provides two methods for calling the Elastic Archivist:
 1. converse() - Uses the /converse endpoint (simpler, recommended)
 2. send_task() - Uses the A2A JSONRPC protocol (/a2a endpoint)

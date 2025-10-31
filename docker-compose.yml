@@ -1,77 +1,81 @@
 version: '3.8'
 
 services:
-# Python agents and services
-newsroom-agents:
-build:
-context: .
-dockerfile: Dockerfile
-container_name: elastic-news-agents
-ports:
-- "8095:8095"  # MCP Server
-- "8090:8090"  # Event Hub
-- "8085:8085"  # Article API
-- "8080:8080"  # News Chief
-- "8081:8081"  # Reporter
-- "8082:8082"  # Editor
-- "8083:8083"  # Researcher
-- "8084:8084"  # Publisher
-environment:
-# Anthropic API
-- ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+  # Python agents and services
+  newsroom-agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: elastic-news-agents
+    env_file:
+      - .env
+    ports:
+      - "8095:8095"  # MCP Server
+      - "8090:8090"  # Event Hub
+      - "8085:8085"  # Article API
+      - "8080:8080"  # News Chief
+      - "8081:8081"  # Reporter
+      - "8082:8082"  # Editor
+      - "8083:8083"  # Researcher
+      - "8084:8084"  # Publisher
+    environment:
+      # Anthropic API
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
-# Elasticsearch (optional - for Publisher)
-- ELASTICSEARCH_ENDPOINT=${ELASTICSEARCH_ENDPOINT:-}
-  - ELASTICSEARCH_API_KEY=${ELASTICSEARCH_API_KEY:-}
-    - ELASTIC_ARCHIVIST_INDEX=${ELASTIC_ARCHIVIST_INDEX:-news_archive}
-    
-    # Archivist (optional - for Reporter)
-    - ELASTIC_ARCHIVIST_AGENT_CARD_URL=${ELASTIC_ARCHIVIST_AGENT_CARD_URL:-}
+      # Elasticsearch (optional - for Publisher)
+      - ELASTICSEARCH_ENDPOINT=${ELASTICSEARCH_ENDPOINT:-}
+      - ELASTICSEARCH_API_KEY=${ELASTICSEARCH_API_KEY:-}
+      - ELASTIC_ARCHIVIST_INDEX=${ELASTIC_ARCHIVIST_INDEX:-news_archive}
+
+      # Archivist (optional - for Reporter)
+      - ELASTIC_ARCHIVIST_AGENT_URL=${ELASTIC_ARCHIVIST_AGENT_URL:-}
+      - ELASTIC_ARCHIVIST_AGENT_CARD_URL=${ELASTIC_ARCHIVIST_AGENT_CARD_URL:-}
       - ELASTIC_ARCHIVIST_API_KEY=${ELASTIC_ARCHIVIST_API_KEY:-}
-        
-        # MCP Server (required)
-        - MCP_SERVER_URL=http://localhost:8095
-        
-        # Event Hub (required for UI)
-        - EVENT_HUB_URL=http://localhost:8090
-        - EVENT_HUB_ENABLED=true
-        volumes:
-          - ./logs:/app/logs
-          - ./articles:/app/articles
-          restart: unless-stopped
-          networks:
-            - elastic-news-network
-            healthcheck:
-              test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
-              interval: 30s
-              timeout: 10s
-              retries: 3
-              start_period: 40s
-              
-              # React UI
-              newsroom-ui:
-                build:
-                  context: ./react-ui
-                  dockerfile: Dockerfile
-                  container_name: elastic-news-ui
-                  ports:
-                    - "3001:3001"  # React UI
-                    environment:
-                      - NODE_ENV=production
-                      - REACT_APP_API_URL=http://localhost:8080
-                      - REACT_APP_EVENT_HUB_URL=http://localhost:8090
-                      depends_on:
-                        newsroom-agents:
-                          condition: service_healthy
-                          restart: unless-stopped
-                          networks:
-                            - elastic-news-network
-                            
+
+      # MCP Server (required)
+      - MCP_SERVER_URL=http://localhost:8095
+
+      # Event Hub (required for UI)
+      - EVENT_HUB_URL=http://localhost:8090
+      - EVENT_HUB_ENABLED=true
+    volumes:
+      - ./logs:/app/logs
+      - ./articles:/app/articles
+    restart: unless-stopped
+    networks:
+      - elastic-news-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React UI
+  newsroom-ui:
+    build:
+      context: ./react-ui
+      dockerfile: Dockerfile
+    container_name: elastic-news-ui
+    env_file:
+      - .env
+    ports:
+      - "3001:3001"  # React UI
+    environment:
+      - NODE_ENV=production
+      - REACT_APP_API_URL=http://localhost:8080
+      - REACT_APP_EVENT_HUB_URL=http://localhost:8090
+    depends_on:
+      newsroom-agents:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - elastic-news-network
+
 networks:
-                            elastic-news-network:
-                              driver: bridge
-                              
+  elastic-news-network:
+    driver: bridge
+
 volumes:
-                              logs:
-                                articles:
-                                  
+  logs:
+  articles:
