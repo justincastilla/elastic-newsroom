@@ -1,0 +1,56 @@
+# CrewAI Task Configuration for Researcher Crew
+#
+# This YAML file defines the configuration for research tasks.
+# It can be used for alternative configuration-based task creation.
+
+research_questions:
+  description: >
+    Research the provided questions about {topic}.
+
+    For each question, you must:
+    1. Investigate the question thoroughly using available tools
+    2. Verify any claims or statements
+    3. Gather specific facts, statistics, figures, and data points
+    4. Provide confidence scores for your findings
+    5. Cite credible sources
+    6. Structure your results in the required JSON format
+  expected_output: >
+    A JSON array containing research results for each question with this structure:
+    [
+      {
+        "question": "The original question",
+        "claim_verified": true/false,
+        "confidence": 0-100,
+        "summary": "Brief summary of findings",
+        "facts": ["List of factual statements"],
+        "figures": {
+          "percentages": ["45%", "60% growth"],
+          "dollar_amounts": ["$1.5B", "$3.2B"],
+          "numbers": ["500 companies", "1M users"],
+          "dates": ["Q4 2024", "2025"],
+          "companies": ["Company A", "Company B"]
+        },
+        "sources": ["Source 1", "Source 2", "Source 3"]
+      }
+    ]
+
+fact_verification:
+  description: >
+    Verify the following claims related to {topic}.
+
+    For each claim:
+    1. Assess the accuracy and credibility
+    2. Provide a confidence score (0-100)
+    3. Explain your verification reasoning
+    4. Cite supporting sources if available
+  expected_output: >
+    A JSON array containing verification results for each claim:
+    [
+      {
+        "claim": "The original claim",
+        "verified": true/false,
+        "confidence": 0-100,
+        "explanation": "Reasoning for the verification",
+        "sources": ["Supporting source 1", "Supporting source 2"]
+      }
+    ]

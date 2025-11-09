@@ -14,6 +14,7 @@ import os
 from typing import List, Dict
 
 # Agent configurations: name, port, module
+# Note: Researcher (port 8083) now runs as separate researcher-crew service
 AGENTS = [
     {"name": "MCP Server", "port": 8095, "module": "mcp_servers.newsroom_http_server:app"},
     {"name": "Event Hub", "port": 8090, "module": "services.event_hub:app"},
@@ -21,7 +22,7 @@ AGENTS = [
     {"name": "News Chief", "port": 8080, "module": "agents.news_chief:app"},
     {"name": "Reporter", "port": 8081, "module": "agents.reporter:app"},
     {"name": "Editor", "port": 8082, "module": "agents.editor:app"},
-    {"name": "Researcher", "port": 8083, "module": "agents.researcher:app"},
+    # Researcher moved to separate CrewAI service (researcher-crew)
     {"name": "Publisher", "port": 8084, "module": "agents.publisher:app"},
 ]
 
@@ -179,7 +180,7 @@ def main():
     print("   News Chief:  http://0.0.0.0:8080 (Coordinator)")
     print("   Reporter:    http://0.0.0.0:8081 (Article Writer)")
     print("   Editor:      http://0.0.0.0:8082 (Content Reviewer)")
-    print("   Researcher:  http://0.0.0.0:8083 (Fact Gatherer)")
+    print("   Researcher:  [CrewAI service on port 8083]")
     print("   Publisher:   http://0.0.0.0:8084 (Article Publisher)")
     print()
     print("📁 Logs: /app/logs/")

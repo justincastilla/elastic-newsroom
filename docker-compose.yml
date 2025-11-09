@@ -16,7 +16,7 @@ services:
       - "8080:8080"  # News Chief
       - "8081:8081"  # Reporter
       - "8082:8082"  # Editor
-      - "8083:8083"  # Researcher
+      # 8083 - Researcher (moved to separate researcher-crew service)
       - "8084:8084"  # Publisher
     environment:
       # Anthropic API
@@ -50,6 +50,41 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  # CrewAI Researcher Agent
+  researcher-crew:
+    build:
+      context: .
+      dockerfile: crewai_agents/Dockerfile
+    container_name: elastic-news-researcher-crew
+    env_file:
+      - .env
+    ports:
+      - "8083:8083"  # Researcher (CrewAI)
+    environment:
+      # Anthropic API (required for CrewAI)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+
+      # MCP Server (for research tools)
+      - MCP_SERVER_URL=http://newsroom-agents:8095
+
+      # Event Hub (for real-time updates)
+      - EVENT_HUB_URL=http://newsroom-agents:8090
+      - EVENT_HUB_ENABLED=true
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      newsroom-agents:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - elastic-news-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # React UI
   newsroom-ui:

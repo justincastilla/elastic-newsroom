@@ -40,6 +40,9 @@ PORT_UI_REACT=3001
 ALL_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER $PORT_UI_MESOP $PORT_UI_REACT)
 
 # Agent configurations: name:port:module
+# Note: Researcher can run as either A2A agent or CrewAI agent
+# - A2A: agents.researcher:app (default below)
+# - CrewAI: python -m crewai_agents.researcher_crew.main
 AGENTS=(
     "MCP Server:${PORT_MCP_SERVER}:mcp_servers.newsroom_http_server:app"
     "Event Hub:${PORT_EVENT_HUB}:services.event_hub:app"
