@@ -12,7 +12,6 @@ Elastic News is a working multi-agent AI newsroom demonstrating Agent2Agent (A2A
 - Anthropic Claude Sonnet 4 for AI content generation
 - Elasticsearch for article indexing and historical search
 - React UI (port 3001) - Primary interface with real-time monitoring
-- Mesop UI (port 3000) - Legacy interface
 - Event Hub (port 8090) - SSE-based event broadcasting
 - Uvicorn ASGI server
 
@@ -58,9 +57,6 @@ uvicorn agents.publisher:app --host localhost --port 8084 --reload
 ```
 
 ### Web UI
-```bash
-# Start UI only (requires agents running)
-cd ui && mesop main.py --port=3000
 
 # Or use the script
 ./start_ui.sh
@@ -312,7 +308,6 @@ See `services/event_hub.py` for implementation.
 
 **User Interfaces:**
 - `react-ui/` - Modern React UI with real-time monitoring (port 3001, primary)
-- `ui/main.py` - Mesop UI entry point (port 3000, legacy)
 
 **Scripts:**
 - `scripts/start_newsroom.sh` - Start/stop all agents + services
@@ -472,9 +467,6 @@ Agents support `--reload` flag for development:
 ```bash
 uvicorn agents.reporter:app --host localhost --port 8081 --reload --reload-dirs=./agents
 ```
-
-Mesop UI has hot reload enabled by default.
-
 ### Timeouts
 
 - Standard A2A calls: 90 seconds
@@ -500,13 +492,6 @@ Modern React interface with real-time SSE updates, workflow visualization, and m
 ```
 
 **Key Features:** Real-time agent status, live workflow progress, SSE event streaming from Event Hub (port 8090)
-
-### Mesop UI (Legacy - Port 3000)
-Original Mesop interface with manual refresh.
-
-```bash
-cd ui && mesop main.py --port=3000
-```
 
 ## Testing
 
@@ -600,7 +585,6 @@ Modify `agents/editor.py:_review_article()` prompt to include additional review 
 - **A2A SDK**: https://github.com/a2aproject/a2a-python
 - **A2A Samples**: https://github.com/a2aproject/a2a-samples
 - **Elastic Agent Builder A2A**: https://www.elastic.co/docs/solutions/search/agent-builder/a2a-server
-- **Mesop Docs**: https://google.github.io/mesop/
 - **Pytest Docs**: https://docs.pytest.org/
 
 ## Development Workflow
