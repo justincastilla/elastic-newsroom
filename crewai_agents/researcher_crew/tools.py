@@ -9,7 +9,7 @@ import json
 import os
 import logging
 from typing import List, Dict, Any
-from crewai_tools import tool
+from langchain_core.tools import tool
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
