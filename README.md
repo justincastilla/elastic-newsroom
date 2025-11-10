@@ -272,7 +272,7 @@ See [docs/archivist-integration.md](docs/archivist-integration.md) for complete 
 - **AI Model**: Anthropic Claude Sonnet 4
 - **Search**: Elastic Serverless (Elastic Cloud)
 - **Archivist API**: Elastic Conversational API (`/agent_builder/converse`)
-- **Web Framework**: Starlette (via A2A SDK) + Mesop (UI)
+- **Web Framework**: Starlette (via A2A SDK) + React (UI)
 - **Server**: Uvicorn ASGI server
 - **HTTP Client**: httpx (async)
 - **Language**: Python 3.10+
