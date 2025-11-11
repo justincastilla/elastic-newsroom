@@ -78,6 +78,161 @@ class A2ATaskRequest(BaseModel):
 
 # ===== A2A Protocol Compatibility =====
 
+@app.post("/")
+async def a2a_jsonrpc_handler(request: Request):
+    """
+    A2A JSON-RPC 2.0 handler at root endpoint.
+
+    The A2A SDK posts JSON-RPC requests directly to the agent's URL
+    (as specified in the agent card), not to a sub-path.
+
+    Handles A2A protocol methods:
+    - tasks/send: Send a task message
+    - tasks/get: Retrieve task status
+    """
+    try:
+        # Parse JSON-RPC request
+        body = await request.json()
+        logger.info(f"📨 A2A JSON-RPC request received: method={body.get('method')}")
+
+        jsonrpc_version = body.get("jsonrpc", "2.0")
+        method = body.get("method")
+        params = body.get("params", {})
+        request_id = body.get("id")
+
+        # Handle tasks/send method (primary A2A method)
+        if method == "tasks/send":
+            # Extract input from params
+            input_data = params.get("input", {})
+
+            # Parse the message parts
+            parts = input_data.get("parts", [])
+            if not parts:
+                raise HTTPException(status_code=400, detail="No message parts in input")
+
+            # Get the text content from first part
+            message_text = parts[0].get("text", "")
+
+            # Parse the action JSON from message text
+            try:
+                action_data = json.loads(message_text)
+            except json.JSONDecodeError:
+                # If not JSON, treat as plain text
+                action_data = {"message": message_text}
+
+            action = action_data.get("action")
+            logger.info(f"🎯 A2A action: {action}")
+
+            # Route to appropriate handler
+            if action == "research_questions":
+                story_id = action_data.get("story_id")
+                topic = action_data.get("topic", "")
+                questions = action_data.get("questions", [])
+
+                if not story_id or not questions:
+                    return _format_jsonrpc_error(
+                        request_id,
+                        -32602,
+                        "Missing required fields: story_id or questions"
+                    )
+
+                # Call CrewAI crew
+                result = await researcher_crew.research_questions(
+                    questions=questions,
+                    topic=topic,
+                    story_id=story_id
+                )
+
+                # Return JSON-RPC success response
+                return {
+                    "jsonrpc": jsonrpc_version,
+                    "id": request_id,
+                    "result": {
+                        "parts": [{
+                            "text": json.dumps(result, indent=2)
+                        }]
+                    }
+                }
+
+            elif action == "get_history":
+                research_id = action_data.get("research_id")
+                story_id = action_data.get("story_id")
+
+                result = researcher_crew.get_research_history(
+                    research_id=research_id,
+                    story_id=story_id
+                )
+
+                return {
+                    "jsonrpc": jsonrpc_version,
+                    "id": request_id,
+                    "result": {
+                        "parts": [{
+                            "text": json.dumps(result, indent=2)
+                        }]
+                    }
+                }
+
+            elif action == "get_status":
+                result = researcher_crew.get_status()
+
+                return {
+                    "jsonrpc": jsonrpc_version,
+                    "id": request_id,
+                    "result": {
+                        "parts": [{
+                            "text": json.dumps(result, indent=2)
+                        }]
+                    }
+                }
+
+            else:
+                return _format_jsonrpc_error(
+                    request_id,
+                    -32601,
+                    f"Unknown action: {action}"
+                )
+
+        elif method == "tasks/get":
+            # Get task status (for future implementation)
+            task_id = params.get("taskId")
+            return {
+                "jsonrpc": jsonrpc_version,
+                "id": request_id,
+                "result": {
+                    "status": "completed",
+                    "taskId": task_id
+                }
+            }
+
+        else:
+            return _format_jsonrpc_error(
+                request_id,
+                -32601,
+                f"Method not found: {method}"
+            )
+
+    except Exception as e:
+        logger.error(f"❌ A2A JSON-RPC handler error: {e}", exc_info=True)
+        return _format_jsonrpc_error(
+            body.get("id") if "body" in locals() else None,
+            -32603,
+            f"Internal error: {str(e)}"
+        )
+
+
+def _format_jsonrpc_error(request_id: Optional[str], code: int, message: str) -> Dict[str, Any]:
+    """Format a JSON-RPC 2.0 error response."""
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": code,
+            "message": message
+        }
+    }
+
+
 @app.get("/.well-known/agent-card.json")
 async def get_agent_card():
     """
