@@ -63,18 +63,49 @@ def start_agent(name: str, port: int, module: str) -> subprocess.Popen:
         module,
         "--host", "0.0.0.0",  # Bind to all interfaces for Docker
         "--port", str(port),
+        "--log-level", "info",
     ]
 
     log_file = f"logs/{name.replace(' ', '_')}.log"
 
     try:
-        with open(log_file, "w") as log:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid if sys.platform != 'win32' else None
-            )
+        # Open log file for writing
+        log_fd = open(log_file, "w")
+
+        # Start process with output going to BOTH stdout and log file
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            preexec_fn=os.setsid if sys.platform != 'win32' else None,
+            text=True,
+            bufsize=1
+        )
+
+        # Create a thread to tee output to both stdout and file
+        import threading
+
+        def tee_output(pipe, file_handle, prefix):
+            """Read from pipe and write to both stdout and file"""
+            try:
+                for line in pipe:
+                    # Write to file
+                    file_handle.write(line)
+                    file_handle.flush()
+                    # Write to stdout with prefix
+                    print(f"[{prefix}] {line}", end='', flush=True)
+            except Exception as e:
+                print(f"Error in tee_output for {prefix}: {e}")
+            finally:
+                file_handle.close()
+
+        # Start tee thread
+        tee_thread = threading.Thread(
+            target=tee_output,
+            args=(proc.stdout, log_fd, name),
+            daemon=True
+        )
+        tee_thread.start()
 
         # Give it a moment to start
         time.sleep(1)
@@ -83,7 +114,7 @@ def start_agent(name: str, port: int, module: str) -> subprocess.Popen:
         if proc.poll() is None:
             print(f"   ✅ {name} started (PID: {proc.pid})")
             print(f"      URL: http://0.0.0.0:{port}")
-            print(f"      Logs: {log_file}")
+            print(f"      Logs: {log_file} (also visible in docker compose logs)")
             return proc
         else:
             print(f"   ❌ {name} failed to start")
