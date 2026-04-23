@@ -1,5 +1,5 @@
 # Official A2A SDK
-a2a-sdk[all]==0.3.8
+a2a-sdk[all]==0.3.26
 
 # Core dependencies (let A2A SDK manage versions)
 uvicorn
@@ -8,7 +8,10 @@ click
 watchfiles  # For hot reload
 
 # AI/LLM
-anthropic>=0.18.0
+anthropic>=0.50.0
+
+# Search / Research
+tavily-python>=0.7.23
 
 # Elasticsearch
 elasticsearch>=9.1.1
@@ -18,7 +21,7 @@ python-dotenv>=1.1.0  # Required by fastmcp
 loguru==0.7.2
 
 # MCP (Model Context Protocol)
-fastmcp>=2.12.5
+fastmcp>=3.2.4
 
 # Testing
 pytest>=8.0.0

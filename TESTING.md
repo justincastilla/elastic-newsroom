@@ -29,13 +29,13 @@ make test
 ```
 
 The mock system provides:
-- ✅ No API keys required
-- ✅ No external services needed
+- ✅ No API keys required (except ANTHROPIC_API_KEY)
+- ✅ No external services needed (MockTavilyClient replaces real Tavily)
 - ✅ Fast execution (~0.5s vs ~120s)
 - ✅ No API costs
 - ✅ Works offline
 
-See [`tests/mocks/README.md`](tests/mocks/README.md) for detailed mock documentation.
+See [`tests/mocks/README.md`](tests/mocks/README.md) for detailed mock documentation, including MockTavilyClient for mocking web search.
 
 ### Run Tests with Mocks (Default)
 

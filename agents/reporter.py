@@ -84,7 +84,7 @@ class ReporterAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
+                logger.debug("Received query: %s", format_json_for_log(query))
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -92,7 +92,7 @@ class ReporterAgent(BaseAgent):
 
             # Only log non-status actions to reduce log spam
             if action != "get_status":
-                logger.info(f"🎯 Action: {action}")
+                logger.info("Action: %s", action)
 
             if action == "accept_assignment":
                 return await self._accept_assignment(query_data)
@@ -115,7 +115,7 @@ class ReporterAgent(BaseAgent):
                 "message": f"Invalid JSON in query: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"Error processing request: {e}", exc_info=True)
+            logger.error("Error processing request: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Error processing request: {str(e)}"
@@ -123,7 +123,7 @@ class ReporterAgent(BaseAgent):
 
     async def _accept_assignment(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Accept a story assignment from News Chief"""
-        logger.info("📨 Processing assignment from News Chief...")
+        logger.info("Processing assignment from News Chief...")
         assignment = request.get("assignment", {})
 
         # Validate assignment
@@ -134,11 +134,7 @@ class ReporterAgent(BaseAgent):
         if not story_id:
             return self._error_response("Assignment missing story_id")
 
-        logger.info(f"📋 Assignment details:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Topic: {assignment.get('topic')}")
-        logger.info(f"   Target Length: {assignment.get('target_length')} words")
-        logger.info(f"   Priority: {assignment.get('priority')}")
+        logger.info("Assignment accepted: story=%s topic=%s length=%s priority=%s", story_id, assignment.get('topic'), assignment.get('target_length'), assignment.get('priority'))
 
         # Store assignment
         self.assignments[story_id] = {
@@ -159,8 +155,7 @@ class ReporterAgent(BaseAgent):
             }
         )
 
-        logger.info(f"✅ Assignment accepted and stored")
-        logger.info(f"   Total assignments: {len(self.assignments)}")
+        logger.info("Assignment stored successfully: total=%s", len(self.assignments))
 
         return self._success_response(
             f"Assignment accepted for story: {assignment.get('topic', story_id)}",
@@ -171,7 +166,7 @@ class ReporterAgent(BaseAgent):
 
     async def _write_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Write an article using Anthropic Claude with Researcher support"""
-        logger.info("✍️  Starting article writing...")
+        logger.info("Starting article writing...")
         story_id = request.get("story_id")
 
         if not story_id:
@@ -181,7 +176,7 @@ class ReporterAgent(BaseAgent):
             return self._error_response(f"No assignment found for story_id: {story_id}")
 
         assignment = self.assignments[story_id]
-        logger.info(f"📝 Writing article for: {assignment.get('topic')}")
+        logger.info("Writing article for: %s", assignment.get('topic'))
 
         # Update status
         self.assignments[story_id]["reporter_status"] = "researching"
@@ -189,7 +184,7 @@ class ReporterAgent(BaseAgent):
 
         # Generate outline and research questions
         try:
-            logger.info("📋 Generating outline and identifying research needs...")
+            logger.info("Generating outline and identifying research needs...")
             outline_and_questions = await self._generate_outline_and_questions(assignment)
             outline = outline_and_questions.get("outline", "")
             research_questions = outline_and_questions.get("research_questions", [])
@@ -201,15 +196,14 @@ class ReporterAgent(BaseAgent):
                 data={"question_count": len(research_questions)}
             )
 
-            logger.info(f"✅ Outline generated")
-            logger.info(f"   Research questions identified: {len(research_questions)}")
+            logger.info("Outline generated: questions=%s", len(research_questions))
 
             # Call both Researcher and Archivist in parallel
             research_results = None
             archive_results = None
 
             if research_questions:
-                logger.info("🔍 Calling Researcher and Archivist in parallel...")
+                logger.info("Calling Researcher and Archivist in parallel...")
 
                 # Publish event: research requested
                 await self._publish_event(
@@ -228,7 +222,7 @@ class ReporterAgent(BaseAgent):
                 # Set waiting status and Archivist status to active
                 self.waiting_status[story_id] = "researcher_archivist"
                 self.archivist_status[story_id] = "active"
-                logger.info(f"🟡 Reporter waiting for Researcher and Archivist (story: {story_id})")
+                logger.debug("Reporter waiting for Researcher and Archivist: story=%s", story_id)
 
                 # Create tasks for parallel execution
                 researcher_task = self._send_to_researcher(story_id, assignment, research_questions)
@@ -243,16 +237,16 @@ class ReporterAgent(BaseAgent):
 
                 # Process Researcher response
                 if isinstance(research_response, Exception):
-                    logger.error(f"❌ Researcher failed: {research_response}")
+                    logger.error("Researcher failed: %s", research_response)
                 elif research_response.get("status") == "success":
                     research_results = research_response.get("research_results", [])
                     self.research_data[story_id] = {
                         "questions": research_questions,
                         "results": research_results
                     }
-                    logger.info(f"✅ Received research data: {len(research_results)} answers")
+                    logger.debug("Received research data: answers=%s", len(research_results))
                 else:
-                    logger.warning(f"⚠️  Research request failed: {research_response.get('message')}")
+                    logger.warning("Research request failed: %s", research_response.get('message'))
 
                 # Process Archivist response - REQUIRED, stop workflow if it fails
                 if isinstance(archive_response, Exception):
@@ -261,7 +255,7 @@ class ReporterAgent(BaseAgent):
                         f"The Archivist is required for the Reporter workflow. "
                         f"Error: {archive_response}"
                     )
-                    logger.error(f"❌ CRITICAL: {error_msg}")
+                    logger.error("CRITICAL: %s", error_msg)
                     self.archivist_status[story_id] = "error"
                     raise Exception(error_msg)
                 elif archive_response.get("status") == "success":
@@ -269,7 +263,7 @@ class ReporterAgent(BaseAgent):
                     self.archive_data[story_id] = {
                         "results": archive_results
                     }
-                    logger.info(f"✅ Received archive data: {len(archive_results)} historical articles")
+                    logger.info("Archive search completed: articles=%s", len(archive_results))
                     self.archivist_status[story_id] = "completed"
 
                     # Publish event: archive search completed
@@ -285,7 +279,7 @@ class ReporterAgent(BaseAgent):
                         f"Workflow error: Archivist {status} - {error_detail}. "
                         f"The Archivist is required for the Reporter workflow to search historical articles."
                     )
-                    logger.error(f"❌ CRITICAL: {error_msg}")
+                    logger.error("CRITICAL: %s", error_msg)
                     self.archivist_status[story_id] = "error"
                     raise Exception(error_msg)
                 elif archive_response.get("status") == "skipped":
@@ -294,7 +288,7 @@ class ReporterAgent(BaseAgent):
                         f"Workflow error: Archivist was skipped - {skip_message}. "
                         f"The Archivist is required for the Reporter workflow to search historical articles."
                     )
-                    logger.error(f"❌ CRITICAL: {error_msg}")
+                    logger.error("CRITICAL: %s", error_msg)
                     self.archivist_status[story_id] = "error"
                     raise Exception(error_msg)
                 else:
@@ -303,26 +297,43 @@ class ReporterAgent(BaseAgent):
                         f"Workflow error: Archivist returned unexpected status '{unexpected_status}'. "
                         f"The Archivist is required for the Reporter workflow to search historical articles."
                     )
-                    logger.error(f"❌ CRITICAL: {error_msg}")
+                    logger.error("CRITICAL: %s", error_msg)
                     self.archivist_status[story_id] = "error"
                     raise Exception(error_msg)
             else:
-                logger.info("ℹ️  No research questions needed for this article")
+                logger.debug("No research questions needed for this article")
 
             # Clear waiting status and update to writing
             self.waiting_status[story_id] = "none"
             self.assignments[story_id]["reporter_status"] = "writing"
-            logger.info(f"🟢 Reporter finished waiting, now writing (story: {story_id})")
+            logger.debug("Reporter finished waiting, now writing: story=%s", story_id)
 
             # Generate article with research and archive data
-            logger.info("🤖 Calling Anthropic API to generate article...")
+            logger.info("Generating article...")
             article_content = await self._generate_article(assignment, outline, research_results, archive_results)
-            logger.info(f"✅ Article generated: {len(article_content.split())} words")
+            logger.info("Article generated: words=%s", len(article_content.split()))
+
+            # Extract headline from article content
+            lines = article_content.strip().split('\n')
+            import re as _re
+            # Priority 1: "HEADLINE: ..." prefix
+            headline_line = next((l.strip() for l in lines if l.strip().startswith('HEADLINE:')), None)
+            if headline_line:
+                headline = headline_line.replace('HEADLINE:', '').strip()
+            else:
+                # Priority 2: First markdown heading (# or ##)
+                heading_line = next((l.strip() for l in lines if _re.match(r'^#{1,2}\s+.+', l.strip())), None)
+                if heading_line:
+                    headline = _re.sub(r'^#+\s+', '', heading_line)
+                else:
+                    # Priority 3: First non-empty line
+                    headline = next((l.strip() for l in lines if l.strip()), "Untitled Article")
 
             # Store draft
             draft = {
                 "story_id": story_id,
                 "assignment": assignment,
+                "headline": headline,
                 "content": article_content,
                 "word_count": len(article_content.split()),
                 "created_at": datetime.now().isoformat(),
@@ -333,13 +344,6 @@ class ReporterAgent(BaseAgent):
             # Update assignment status
             self.assignments[story_id]["reporter_status"] = "draft_complete"
             self.assignments[story_id]["completed_at"] = datetime.now().isoformat()
-
-            # Extract headline for event
-            lines = article_content.strip().split('\n')
-            headline = next((line.strip() for line in lines if line.strip() and not line.strip().startswith('#')), "Untitled Article")
-            # Strip "HEADLINE:" prefix if present
-            if headline.startswith("HEADLINE:"):
-                headline = headline[len("HEADLINE:"):].strip()
 
             # Publish event: article drafted
             await self._publish_event(
@@ -352,24 +356,29 @@ class ReporterAgent(BaseAgent):
                 }
             )
 
-            logger.info(f"✅ Draft stored successfully")
-            logger.info(f"   Word count: {draft['word_count']}")
-            logger.info(f"   Total drafts: {len(self.drafts)}")
+            logger.info("Draft stored: words=%s total=%s", draft['word_count'], len(self.drafts))
 
             # Submit draft to News Chief for workflow management
-            logger.info("📤 Submitting draft to News Chief for workflow management...")
+            logger.info("Submitting draft to News Chief for workflow management...")
             news_chief_response = await self._submit_draft_to_news_chief(story_id, draft)
 
             if news_chief_response.get("status") == "success":
-                logger.info(f"✅ Draft submitted to News Chief successfully")
-                logger.info(f"   News Chief will handle editorial workflow")
+                logger.info("Draft submitted to News Chief successfully")
 
                 # Extract headline from article content
                 lines = article_content.strip().split('\n')
-                headline = next((line.strip() for line in lines if line.strip() and not line.strip().startswith('#')), "Untitled Article")
-                # Strip "HEADLINE:" prefix if present
-                if headline.startswith("HEADLINE:"):
-                    headline = headline[len("HEADLINE:"):].strip()
+                # Priority 1: "HEADLINE: ..." prefix
+                headline_line = next((l.strip() for l in lines if l.strip().startswith('HEADLINE:')), None)
+                if headline_line:
+                    headline = headline_line.replace('HEADLINE:', '').strip()
+                else:
+                    # Priority 2: First markdown heading (# or ##)
+                    heading_line = next((l.strip() for l in lines if _re.match(r'^#{1,2}\s+.+', l.strip())), None)
+                    if heading_line:
+                        headline = _re.sub(r'^#+\s+', '', heading_line)
+                    else:
+                        # Priority 3: First non-empty line
+                        headline = next((l.strip() for l in lines if l.strip()), "Untitled Article")
 
                 return {
                     "status": "success",
@@ -380,7 +389,7 @@ class ReporterAgent(BaseAgent):
                     "news_chief_response": news_chief_response
                 }
             else:
-                logger.warning(f"⚠️  Failed to submit to News Chief: {news_chief_response.get('message')}")
+                logger.warning("Failed to submit to News Chief: %s", news_chief_response.get('message'))
 
             # Fallback: return draft completion if News Chief submission failed
             return {
@@ -392,7 +401,7 @@ class ReporterAgent(BaseAgent):
             }
 
         except Exception as e:
-            logger.error(f"Error generating article: {e}", exc_info=True)
+            logger.error("Error generating article: %s", e, exc_info=True)
             self.assignments[story_id]["reporter_status"] = "error"
             return {
                 "status": "error",
@@ -407,7 +416,7 @@ class ReporterAgent(BaseAgent):
         target_length = assignment.get("target_length", 1000)
 
         try:
-            logger.info(f"🔧 Calling MCP generate_outline tool...")
+            logger.debug("Calling MCP generate_outline tool...")
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -424,11 +433,11 @@ class ReporterAgent(BaseAgent):
 
             # Parse the JSON response
             outline_data = json.loads(result) if isinstance(result, str) else result
-            logger.info(f"✅ Outline generated with {len(outline_data.get('research_questions', []))} research questions")
+            logger.debug("Outline generated: questions=%s", len(outline_data.get('research_questions', [])))
             return outline_data
 
         except Exception as e:
-            logger.error(f"❌ MCP generate_outline tool failed: {e}", exc_info=True)
+            logger.error("MCP generate_outline tool failed: %s", e, exc_info=True)
             # MCP server is REQUIRED - re-raise with clear message
             raise
 
@@ -446,28 +455,23 @@ class ReporterAgent(BaseAgent):
                     "topic": assignment.get("topic"),
                     "questions": questions
                 }
-                logger.info(f"📨 Sending A2A message to Researcher:")
-                logger.info(f"   Story ID: {story_id}")
-                logger.info(f"   Questions: {len(questions)}")
+                logger.debug("Sending A2A message to Researcher: story=%s questions=%s", story_id, len(questions))
 
                 message = create_text_message_object(content=json.dumps(request))
 
                 # Get response using helper
-                logger.info(f"⏳ Waiting for Researcher response...")
+                logger.debug("Waiting for Researcher response...")
                 result = await self._parse_a2a_response(researcher_client, message)
 
                 if result:
-                    logger.info(f"📬 Received A2A response from Researcher:")
-                    logger.info(f"   Status: {result.get('status')}")
-                    logger.info(f"   Research ID: {result.get('research_id')}")
-                    logger.info(f"   Questions answered: {result.get('total_questions')}")
+                    logger.debug("Received A2A response from Researcher: status=%s research_id=%s answered=%s", result.get('status'), result.get('research_id'), result.get('total_questions'))
                     return result
 
-                logger.warning("⚠️  No response from Researcher")
+                logger.warning("No response from Researcher")
                 return {"status": "error", "message": "No response from Researcher"}
 
         except Exception as e:
-            logger.error(f"Failed to send research request to Researcher: {e}", exc_info=True)
+            logger.error("Failed to send research request to Researcher: %s", e, exc_info=True)
             return self._error_response(f"Failed to contact Researcher: {str(e)}")
 
     async def _send_to_archivist(self, story_id: str, assignment: Dict[str, Any]) -> Dict[str, Any]:
@@ -484,7 +488,7 @@ class ReporterAgent(BaseAgent):
                 "Set ELASTIC_ARCHIVIST_AGENT_URL or ELASTIC_ARCHIVIST_AGENT_CARD_URL environment variable. "
                 "The Archivist is required for the Reporter workflow to search historical articles."
             )
-            logger.error(f"❌ {error_msg}")
+            logger.error("Configuration error: %s", error_msg)
             raise Exception(error_msg)
 
         if not self.archivist_api_key:
@@ -493,7 +497,7 @@ class ReporterAgent(BaseAgent):
                 "Set ELASTIC_ARCHIVIST_API_KEY environment variable. "
                 "The Archivist is required for the Reporter workflow to search historical articles."
             )
-            logger.error(f"❌ {error_msg}")
+            logger.error("Configuration error: %s", error_msg)
             raise Exception(error_msg)
 
         # Build search query from topic and angle
@@ -501,22 +505,24 @@ class ReporterAgent(BaseAgent):
         angle = assignment.get("angle", "")
         search_query = f"Find articles about {topic} {angle}".strip()
 
-        logger.info(f"🔍 Calling Archivist via archivist_client module")
-        logger.info(f"   Search query: '{search_query}'")
+        archivist_source = "ELASTIC_ARCHIVIST_AGENT_URL" if self.archivist_agent_url else "ELASTIC_ARCHIVIST_AGENT_CARD_URL"
+        logger.debug("Calling Archivist via archivist_client module: query=%s, url_source=%s", search_query, archivist_source)
 
         # Call the archivist client using converse() endpoint (simpler, recommended)
         # Alternative: use send_task() for A2A JSONRPC protocol
+        # Passes both URLs; converse() prefers agent_url, falls back to card_url
         try:
             result = await converse(
                 query=search_query,
                 story_id=story_id,
-                agent_url=self.archivist_agent_url,  # Direct endpoint
+                agent_url=self.archivist_agent_url,
+                card_url=self.archivist_card_url,
                 api_key=self.archivist_api_key,
                 max_retries=10
             )
             return result
         except Exception as e:
-            logger.error(f"❌ Archivist call failed: {e}")
+            logger.error("Archivist call failed: %s", e)
             raise
 
     async def _generate_article(self, assignment: Dict[str, Any], outline: str = "", research_results: Optional[List[Dict[str, Any]]] = None, archive_results: Optional[List[Dict[str, Any]]] = None) -> str:
@@ -537,7 +543,7 @@ class ReporterAgent(BaseAgent):
                 archive_context = archive_results
 
         try:
-            logger.info(f"🔧 Calling MCP generate_article tool...")
+            logger.debug("Calling MCP generate_article tool...")
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -555,28 +561,39 @@ class ReporterAgent(BaseAgent):
                 }
             )
 
-            logger.info(f"✅ Article generated: {len(str(result).split())} words")
+            logger.debug("Article generated: words=%s", len(str(result).split()))
             return result
 
         except Exception as e:
-            logger.error(f"❌ MCP generate_article tool failed: {e}", exc_info=True)
+            logger.error("MCP generate_article tool failed: %s", e, exc_info=True)
             # MCP server is required - re-raise the exception
             raise Exception(f"MCP generate_article tool failed: {e}")
 
-    def _generate_mock_article(self, topic: str, angle: str, target_length: int) -> str:
-        """Generate a simple mock article when Anthropic API is not available"""
-        return f"""HEADLINE: {topic}: A Comprehensive Analysis
+    def _extract_research_sources(self, story_id: str) -> List[Dict[str, str]]:
+        """Extract unique source URLs from research results for article attribution."""
+        sources = []
+        seen_urls = set()
+        research_results = self.research_data.get(story_id, {}).get("results", [])
 
-{topic} has emerged as a significant development in recent news. {angle if angle else 'This story examines the key aspects and implications of this important topic.'}
+        for result in research_results:
+            result_sources = result.get("sources", [])
+            for source in result_sources:
+                # Handle both dict sources (Tavily) and string sources (legacy)
+                if isinstance(source, dict):
+                    url = source.get("url", "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        sources.append({
+                            "title": source.get("title", ""),
+                            "url": url,
+                            "published_date": source.get("published_date", "")
+                        })
+                elif isinstance(source, str) and source.startswith("http"):
+                    if source not in seen_urls:
+                        seen_urls.add(source)
+                        sources.append({"title": source, "url": source, "published_date": ""})
 
-Industry experts and analysts have been closely monitoring these developments, noting the potential impact on various stakeholders. The situation continues to evolve, with new information emerging regularly.
-
-Sources familiar with the matter indicate that multiple factors are contributing to the current state of affairs. Observers suggest that the coming weeks will be crucial in determining the long-term implications.
-
-Further updates will be provided as more information becomes available. Stakeholders are advised to monitor the situation closely and stay informed through reliable news sources.
-
-[Article generated with mock content - ANTHROPIC_API_KEY not configured]
-[Target length: {target_length} words]"""
+        return sources
 
     async def _submit_draft_to_news_chief(self, story_id: str, draft: Dict[str, Any]) -> Dict[str, Any]:
         """Submit draft to News Chief for workflow management"""
@@ -592,32 +609,27 @@ Further updates will be provided as more information becomes available. Stakehol
                     "story_id": story_id,
                     "draft": draft
                 }
-                logger.info(f"📨 Sending draft submission to News Chief:")
-                logger.info(f"   Story ID: {story_id}")
-                logger.info(f"   Word Count: {draft.get('word_count')}")
-                logger.info(f"   Reporter assignments: {list(self.assignments.keys())}")
+                logger.debug("Sending draft submission to News Chief: story=%s words=%s assignments=%s", story_id, draft.get('word_count'), list(self.assignments.keys()))
 
                 message = create_text_message_object(content=json.dumps(submit_request))
 
                 # Get response using helper
-                logger.info(f"⏳ Waiting for News Chief response...")
+                logger.debug("Waiting for News Chief response...")
                 result = await self._parse_a2a_response(news_chief_client, message)
 
                 if result:
-                    logger.info(f"📬 Received response from News Chief:")
-                    logger.info(f"   Status: {result.get('status')}")
-                    logger.info(f"   Message: {result.get('message')}")
+                    logger.debug("Received response from News Chief: status=%s message=%s", result.get('status'), result.get('message'))
                     return result
 
                 return self._error_response("No response from News Chief")
 
         except Exception as e:
-            logger.error(f"Failed to submit draft to News Chief: {e}", exc_info=True)
+            logger.error("Failed to submit draft to News Chief: %s", e, exc_info=True)
             return self._error_response(f"Failed to contact News Chief: {str(e)}")
 
     async def _apply_edits(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Apply editorial suggestions to a draft using Anthropic"""
-        logger.info("✏️  Applying editorial suggestions...")
+        logger.info("Applying editorial suggestions...")
         story_id = request.get("story_id")
         editor_review = request.get("editor_review", {})
 
@@ -633,15 +645,13 @@ Further updates will be provided as more information becomes available. Stakehol
         draft = self.drafts[story_id]
         review = editor_review
 
-        logger.info(f"📝 Applying edits for: {draft.get('assignment', {}).get('topic')}")
-        logger.info(f"   Approval status: {review.get('approval_status')}")
-        logger.info(f"   Suggested edits: {len(review.get('suggested_edits', []))}")
+        logger.info("Applying edits: topic=%s approval=%s edits=%s", draft.get('assignment', {}).get('topic'), review.get('approval_status'), len(review.get('suggested_edits', [])))
 
         # Apply edits using Anthropic
         try:
-            logger.info("🤖 Calling Anthropic API to integrate edits...")
+            logger.info("Integrating edits...")
             revised_content = await self._integrate_edits(draft.get('content'), review)
-            logger.info(f"✅ Edits applied: {len(revised_content.split())} words")
+            logger.info("Edits applied: words=%s", len(revised_content.split()))
 
             # Update the draft
             old_word_count = draft.get("word_count")
@@ -667,11 +677,10 @@ Further updates will be provided as more information becomes available. Stakehol
                 }
             )
 
-            logger.info(f"✅ Draft updated successfully")
-            logger.info(f"   Word count: {old_word_count} → {draft['word_count']}")
+            logger.info("Draft updated: words=%s→%s", old_word_count, draft['word_count'])
 
             # Send finalized article to Publisher (Step 17 in workflow)
-            logger.info("📤 Sending article to Publisher...")
+            logger.info("Sending article to Publisher...")
             publisher_response = await self._send_to_publisher(story_id, draft)
 
             response = {
@@ -687,21 +696,21 @@ Further updates will be provided as more information becomes available. Stakehol
             # Include Publisher response
             if publisher_response.get("status") == "success":
                 response["publisher_response"] = publisher_response
-                logger.info(f"✅ Article published successfully")
+                logger.info("Article published successfully")
             else:
                 response["publisher_error"] = publisher_response.get("message")
-                logger.warning(f"⚠️  Publishing failed: {publisher_response.get('message')}")
+                logger.warning("Publishing failed: %s", publisher_response.get('message'))
 
             return response
 
         except Exception as e:
-            logger.error(f"❌ Error applying edits: {e}", exc_info=True)
+            logger.error("Error applying edits: %s", e, exc_info=True)
             return self._error_response(f"Failed to apply edits: {str(e)}", story_id=story_id)
 
     async def _send_to_publisher(self, story_id: str, draft: Dict[str, Any]) -> Dict[str, Any]:
         """Send finalized article to Publisher for indexing and storage"""
         try:
-            logger.info("📰 Preparing article for publication...")
+            logger.info("Preparing article for publication...")
 
             assignment = draft.get("assignment", {})
 
@@ -721,6 +730,7 @@ Further updates will be provided as more information becomes available. Stakehol
                 "editor": "Editor Agent",
                 "research_questions": self.research_data.get(story_id, {}).get("questions", []),
                 "research_data": self.research_data.get(story_id, {}).get("results", []),
+                "research_sources": self._extract_research_sources(story_id),
                 "editorial_review": self.editor_reviews.get(story_id),
                 "archive_references": self.archive_data.get(story_id, {}).get("results", []),
                 "version": 1,
@@ -743,19 +753,18 @@ Further updates will be provided as more information becomes available. Stakehol
                 }
 
                 message = create_text_message_object(content=json.dumps(request))
-                logger.info("📤 Sending article to Publisher...")
+                logger.debug("Sending article to Publisher...")
 
                 result = await self._parse_a2a_response(publisher_client, message)
 
                 if result:
-                    logger.info(f"✅ Publisher response received")
-                    logger.info(f"   Status: {result.get('status')}")
+                    logger.debug("Publisher response received: status=%s", result.get('status'))
                     return result
 
                 return self._error_response("No response from Publisher")
 
         except Exception as e:
-            logger.error(f"❌ Failed to send to Publisher: {e}", exc_info=True)
+            logger.error("Failed to send to Publisher: %s", e, exc_info=True)
             return self._error_response(f"Failed to contact Publisher: {str(e)}")
 
     async def _integrate_edits(self, original_content: str, review: Dict[str, Any]) -> str:
@@ -763,7 +772,7 @@ Further updates will be provided as more information becomes available. Stakehol
         suggested_edits = review.get("suggested_edits", [])
 
         try:
-            logger.info(f"🔧 Calling MCP apply_edits tool...")
+            logger.debug("Calling MCP apply_edits tool...")
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -777,11 +786,11 @@ Further updates will be provided as more information becomes available. Stakehol
                 }
             )
 
-            logger.info(f"✅ Edits applied: {len(str(result).split())} words")
+            logger.debug("Edits applied: words=%s", len(str(result).split()))
             return result
 
         except Exception as e:
-            logger.error(f"❌ MCP apply_edits tool failed: {e}", exc_info=True)
+            logger.error("MCP apply_edits tool failed: %s", e, exc_info=True)
             # MCP server is required - re-raise the exception
             raise Exception(f"MCP apply_edits tool failed: {e}")
 

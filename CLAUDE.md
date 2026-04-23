@@ -7,9 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Elastic News is a working multi-agent AI newsroom demonstrating Agent2Agent (A2A) and Model Context Protocol (MCP) integration. Five specialized AI agents collaborate via A2A protocol to research, write, edit, and publish news articles.
 
 **Key Technologies:**
-- A2A SDK v0.3.8 for multi-agent coordination
-- MCP (Model Context Protocol) for tool integration
-- Anthropic Claude Sonnet 4 for AI content generation
+- A2A SDK v0.3.26 for multi-agent coordination
+- FastMCP v3.2.4 for Model Context Protocol with built-in HTTP server
+- Tavily for real web search in research
+- Anthropic Claude (configurable, defaults to claude-sonnet-4-6) for AI content generation
 - Elasticsearch for article indexing and historical search
 - React UI (port 3001) - Primary interface with real-time monitoring
 - Event Hub (port 8090) - SSE-based event broadcasting
@@ -243,7 +244,7 @@ See [docs/architecture.md](docs/architecture.md) for complete JSONRPC request/re
 
 MCP server (port 8095) exposes reusable AI tools for research, article generation, editing, and review.
 
-**CRITICAL:** MCP server is **REQUIRED** - all agents fail if not running. Starts automatically with `start_newsroom.sh` or manually via `python -m mcp_servers.newsroom_http_server`.
+**CRITICAL:** MCP server is **REQUIRED** - all agents fail if not running. Starts automatically with `start_newsroom.sh` or manually via `python -m mcp_servers.newsroom_tools` (FastMCP 3.x built-in HTTP server).
 
 **Tools:** research_questions, generate_outline, generate_article, apply_edits, review_article, generate_tags, deploy_to_production, notify_subscribers
 
@@ -302,9 +303,9 @@ See `services/event_hub.py` for implementation.
 - `services/article_api.py` - Article data API for UI
 
 **MCP Integration:**
-- `mcp_servers/newsroom_tools.py` - MCP tool definitions
-- `mcp_servers/newsroom_http_server.py` - HTTP MCP server
-- `utils/mcp_client.py` - MCP client utilities
+- `mcp_servers/newsroom_tools.py` - MCP tool definitions with FastMCP 3.x built-in HTTP server
+- `utils/mcp_client.py` - MCP client using FastMCP's built-in Client
+- `utils/config.py` - Centralized configuration (DEFAULT_MODEL, TAVILY_API_KEY)
 
 **User Interfaces:**
 - `react-ui/` - Modern React UI with real-time monitoring (port 3001, primary)
@@ -340,6 +341,10 @@ Required environment variables (in `.env`):
 ```bash
 # AI/LLM
 ANTHROPIC_API_KEY=sk-ant-api03-xxx
+ANTHROPIC_MODEL=claude-sonnet-4-6  # Optional, defaults to claude-sonnet-4-6
+
+# Web Search (for research_questions tool)
+TAVILY_API_KEY=your_tavily_api_key  # Required for real web search
 
 # Elasticsearch (Direct Write Access for Publisher)
 ELASTICSEARCH_ENDPOINT=https://[cluster].es.[region].gcp.elastic.cloud:443

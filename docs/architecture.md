@@ -136,8 +136,10 @@ The newsroom uses MCP to expose reusable tools that agents can call.
 
 **Location:** `mcp_servers/newsroom_tools.py`
 
+**Framework:** FastMCP 3.2.4 with built-in HTTP server (`http_app()`)
+
 **Available Tools:**
-1. `research_questions` - Answers research questions with structured data (uses Anthropic)
+1. `research_questions` - Answers research questions using Tavily web search with real source URLs
 2. `generate_outline` - Creates article outline and identifies research needs (uses Anthropic)
 3. `generate_article` - Creates article content from outline and research (uses Anthropic)
 4. `apply_edits` - Applies editorial suggestions to article (uses Anthropic)
@@ -151,14 +153,16 @@ The newsroom uses MCP to expose reusable tools that agents can call.
 ```bash
 # MCP server starts automatically with agents via start_newsroom.sh
 # Or start manually:
-python -m mcp_servers.newsroom_http_server
+python -m mcp_servers.newsroom_tools
 ```
 
 ### Configuration
 
 - Set `MCP_SERVER_URL` in `.env` (e.g., `http://localhost:8095`)
+- Set `TAVILY_API_KEY` for web search in research (required)
+- Set `ANTHROPIC_MODEL` for model configuration (optional, defaults to `claude-sonnet-4-6`)
 - MCP server is **REQUIRED** - all agents will fail if MCP is not running
-- See `utils/mcp_client.py` for client implementation
+- See `utils/mcp_client.py` for client implementation using FastMCP's built-in Client
 
 ### MCP is Mandatory
 
@@ -169,7 +173,7 @@ The MCP server is absolutely required for all agent operations. If the MCP serve
 
 ### MCP Client Design
 
-The MCP client supports two modes of operation:
+FastMCP 3.x provides a built-in `Client` class that handles:
 1. **Direct tool calling** via `call_tool()` - Works without Anthropic client
 2. **LLM-based tool selection** via `select_and_call_tool()` - Requires Anthropic client
 

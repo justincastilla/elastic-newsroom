@@ -40,7 +40,7 @@ class TestMockAnthropicClient:
         client = MockAnthropicClient()
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{
                 "role": "user",
@@ -57,7 +57,7 @@ class TestMockAnthropicClient:
         client = MockAnthropicClient()
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             messages=[{
                 "role": "user",
@@ -75,7 +75,7 @@ class TestMockAnthropicClient:
         client = MockAnthropicClient()
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=3000,
             messages=[{
                 "role": "user",
@@ -211,7 +211,7 @@ class TestMockIntegration:
 
         # Step 1: Generate outline
         outline_response = anthropic.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{
                 "role": "user",
@@ -222,7 +222,7 @@ class TestMockIntegration:
 
         # Step 2: Generate article
         article_response = anthropic.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             messages=[{
                 "role": "user",
@@ -267,7 +267,7 @@ class TestMockIntegration:
         # Run operations with mocks
         anthropic = MockAnthropicClient()
         anthropic.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             messages=[{"role": "user", "content": "Test"}]
         )

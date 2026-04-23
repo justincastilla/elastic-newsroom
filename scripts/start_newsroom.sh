@@ -34,13 +34,14 @@ PORT_EDITOR=8082
 PORT_RESEARCHER=8083
 PORT_PUBLISHER=8084
 PORT_UI_REACT=3001
+PORT_UI_DEV=3000
 
 # All ports array (for iteration in loops)
-ALL_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER $PORT_UI_REACT)
+ALL_PORTS=($PORT_NEWS_CHIEF $PORT_REPORTER $PORT_EDITOR $PORT_RESEARCHER $PORT_PUBLISHER $PORT_ARTICLE_API $PORT_EVENT_HUB $PORT_MCP_SERVER $PORT_UI_REACT $PORT_UI_DEV)
 
 # Agent configurations: name:port:module
 AGENTS=(
-    "MCP Server:${PORT_MCP_SERVER}:mcp_servers.newsroom_http_server:app"
+    "MCP Server:${PORT_MCP_SERVER}:mcp_servers.newsroom_tools:app"
     "Event Hub:${PORT_EVENT_HUB}:services.event_hub:app"
     "Article API:${PORT_ARTICLE_API}:services.article_api:app"
     "News Chief:${PORT_NEWS_CHIEF}:agents.news_chief:app"
@@ -83,6 +84,10 @@ if [ "$1" == "--stop" ]; then
     pkill -9 -f "services.event_hub" 2>/dev/null || true
     pkill -9 -f "services.article_api" 2>/dev/null || true
     pkill -9 -f "mcp_servers.newsroom_tools" 2>/dev/null || true
+
+    # Kill React UI dev server (react-scripts spawns child node processes)
+    pkill -9 -f "react-scripts" 2>/dev/null || true
+    pkill -9 -f "react-ui.*start" 2>/dev/null || true
 
     # Stop using PID file
     if [ -f "$PID_FILE" ]; then

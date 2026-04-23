@@ -21,7 +21,7 @@ class MockMessage:
     role: str = "assistant"
     stop_reason: str = "end_turn"
 
-    def __init__(self, text: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, text: str, model: str = "claude-sonnet-4-6"):
         self.content = [MockTextContent(text=text)]
         self.model = model
 
@@ -125,7 +125,7 @@ def mock_anthropic_response(text: str) -> MockMessage:
 # def test_with_mock_anthropic():
 #     mock_client = MockAnthropicClient()
 #     response = mock_client.messages.create(
-#         model="claude-sonnet-4-20250514",
+#         model="claude-sonnet-4-6",
 #         max_tokens=1000,
 #         messages=[{"role": "user", "content": "Write an article about AI"}]
 #     )

@@ -32,12 +32,23 @@ async def _parse_a2a_response(self, client, message) -> Optional[Dict[str, Any]]
     # Standardizes response parsing across all A2A calls
 ```
 
+### MCP Tool Calling Helper
+
+```python
+async def _call_mcp_tool(self, tool_name: str, tool_input: Dict[str, Any]):
+    """Call MCP tool via FastMCP 3.x Client"""
+    # Uses built-in Client from mcp_servers/newsroom_tools.py
+    # Handles Tavily integration for research_questions tool
+    # Centralizes MCP calls with consistent error handling
+```
+
 ### Anthropic API Helper
 
 ```python
 async def _call_anthropic(self, prompt: str, max_tokens: int = 2000, fallback=None):
     """Call Anthropic API with consistent error handling"""
     # Centralizes all Anthropic API calls
+    # Uses DEFAULT_MODEL from utils/config.py for model selection
     # Provides fallback support for when API is unavailable
 ```
 

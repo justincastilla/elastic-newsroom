@@ -44,6 +44,9 @@
         },
         "copy_to": ["content_semantic"]
       },
+      "headline_semantic": {
+        "type": "semantic_text"
+      },
       "content_semantic": {
         "type": "semantic_text"
       },
@@ -187,6 +190,26 @@
       },
       "workflow_duration_ms": {
         "type": "long"
+      },
+      "unpublished_at": {
+        "type": "date",
+        "format": "strict_date_optional_time||epoch_millis"
+      },
+      "research_sources": {
+        "type": "nested",
+        "properties": {
+          "title": {
+            "type": "text"
+          },
+          "url": {
+            "type": "keyword"
+          },
+          "published_date": {
+            "type": "date",
+            "format": "strict_date_optional_time||epoch_millis",
+            "ignore_malformed": true
+          }
+        }
       },
       "metadata": {
         "type": "object",

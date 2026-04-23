@@ -9,13 +9,14 @@ import json
 import logging
 import os
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 import click
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import FileResponse
 from elasticsearch import Elasticsearch
+from elasticsearch.helpers import bulk
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -57,21 +58,17 @@ class PublisherAgent(BaseAgent):
                 )
                 # Test connection
                 info = self.es_client.info()
-                logger.info(f"✅ Connected to Elasticsearch")
-                logger.info(f"   Version: {info['version']['number']}")
-                logger.info(f"   Index: {self.es_index}")
+                logger.debug("Connected to Elasticsearch version=%s index=%s", info['version']['number'], self.es_index)
             except Exception as e:
-                logger.error(f"❌ Failed to connect to Elasticsearch: {e}")
+                logger.error("Failed to connect to Elasticsearch: %s", e)
                 self.es_client = None
         else:
-            logger.warning("⚠️  Elasticsearch credentials not configured")
+            logger.warning("Elasticsearch credentials not configured")
 
         # Initialize Anthropic client using centralized utility (from BaseAgent)
         self._init_anthropic_client()
-        if self.anthropic_client:
-            logger.info("(for tag generation)")
-        else:
-            logger.warning("⚠️  Tags will be empty")
+        if not self.anthropic_client:
+            logger.warning("Anthropic client not available - tags will be empty")
 
         # Initialize MCP client for tool calling
         self._init_mcp_client()
@@ -89,7 +86,7 @@ class PublisherAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
+                logger.info("Received query: %s", format_json_for_log(query))
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -97,10 +94,12 @@ class PublisherAgent(BaseAgent):
 
             # Only log non-status actions to reduce log spam
             if action != "get_status":
-                logger.info(f"🎯 Action: {action}")
+                logger.info("Action: %s", action)
 
             if action == "publish_article":
                 return await self._publish_article(query_data)
+            elif action == "bulk_publish":
+                return await self._bulk_publish(query_data)
             elif action == "unpublish_article":
                 return await self._unpublish_article(query_data)
             elif action == "get_status":
@@ -109,29 +108,60 @@ class PublisherAgent(BaseAgent):
                 return {
                     "status": "error",
                     "message": f"Unknown action: {action}",
-                    "available_actions": ["publish_article", "unpublish_article", "get_status"]
+                    "available_actions": ["publish_article", "bulk_publish", "unpublish_article", "get_status"]
                 }
 
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in query: {e}")
+            logger.error("Invalid JSON in query: %s", e)
             return {
                 "status": "error",
                 "message": f"Invalid JSON in query: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"❌ Error processing request: {e}", exc_info=True)
+            logger.error("Error processing request: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Error processing request: {str(e)}"
             }
 
+    def _sanitize_research_data(self, research_data: list) -> list:
+        """Sanitize research_data so it matches the ES mapping.
+
+        The mapping expects research_data.sources to be keyword (simple strings),
+        but the Reporter may send rich objects with title/url/published_date.
+        This flattens source objects to URL strings before indexing.
+        Structured source data is preserved in the top-level research_sources field.
+        """
+        if not isinstance(research_data, list):
+            return research_data
+
+        sanitized = []
+        for item in research_data:
+            if not isinstance(item, dict):
+                sanitized.append(item)
+                continue
+
+            item_copy = dict(item)
+            sources = item_copy.get("sources")
+            if isinstance(sources, list):
+                flat_sources = []
+                for src in sources:
+                    if isinstance(src, dict):
+                        flat_sources.append(src.get("url", str(src)))
+                    else:
+                        flat_sources.append(str(src))
+                item_copy["sources"] = flat_sources
+            sanitized.append(item_copy)
+
+        return sanitized
+
     async def _publish_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Publish article to Elasticsearch with CI/CD and CRM workflow"""
-        logger.info("📰 Processing article publication...")
+        logger.info("Processing article publication")
 
         article_data = request.get("article")
         if not article_data:
-            logger.error("❌ No article data provided")
+            logger.error("No article data provided")
             return {
                 "status": "error",
                 "message": "No article data provided"
@@ -149,33 +179,28 @@ class PublisherAgent(BaseAgent):
             }
         )
 
-        logger.info(f"📋 Publication details:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Headline: {article_data.get('headline', 'N/A')[:60]}...")
-        logger.info(f"   Word Count: {article_data.get('word_count')}")
+        logger.debug("Publishing story=%s headline=%s words=%s", story_id, article_data.get('headline', 'N/A')[:60], article_data.get('word_count'))
 
         # Check Elasticsearch connection
         if not self.es_client:
-            logger.error("❌ Elasticsearch not available")
+            logger.error("Elasticsearch not available")
             return {
                 "status": "error",
                 "message": "Elasticsearch not configured or unavailable"
             }
 
         # Generate tags and categories
-        logger.info("🏷️  Generating tags and categories...")
+        logger.debug("Generating tags and categories")
         tags, categories = await self._generate_tags_and_categories(article_data)
-        logger.info(f"   Tags: {tags}")
-        logger.info(f"   Categories: {categories}")
+        logger.debug("Tags: %s Categories: %s", tags, categories)
 
         # Build Elasticsearch document
-        logger.info("📦 Building Elasticsearch document...")
+        logger.debug("Building Elasticsearch document")
         es_document = self._build_es_document(article_data, tags, categories)
 
         # ALWAYS save to local file first (fallback if Elasticsearch fails)
-        logger.info(f"💾 Saving article to local file...")
         file_path = await self._save_article_to_file(article_data, tags, categories)
-        logger.info(f"✅ Article saved to: {file_path}")
+        logger.info("Article saved to file: %s", file_path)
 
         # Publish event: file saved
         await self._publish_event(
@@ -187,17 +212,15 @@ class PublisherAgent(BaseAgent):
         # Index to Elasticsearch - CRITICAL STEP
         es_success = False
         es_response = None
-        logger.info(f"📊 Indexing article to Elasticsearch ({self.es_index})...")
+        logger.info("Indexing article to Elasticsearch index=%s", self.es_index)
         try:
             es_response = self.es_client.index(
                 index=self.es_index,
                 id=story_id,  # Use story_id as document ID
-                document=es_document
+                document=es_document,
+                refresh="wait_for"  # Ensure article is immediately searchable
             )
-            logger.info(f"✅ Article indexed to Elasticsearch")
-            logger.info(f"   Index: {es_response['_index']}")
-            logger.info(f"   ID: {es_response['_id']}")
-            logger.info(f"   Result: {es_response['result']}")
+            logger.debug("Article indexed result=%s id=%s", es_response['result'], es_response['_id'])
             es_success = True
 
             # Publish event: elasticsearch indexed
@@ -211,8 +234,8 @@ class PublisherAgent(BaseAgent):
             )
 
         except Exception as e:
-            logger.error(f"❌ Elasticsearch indexing failed: {e}", exc_info=True)
-            logger.warning(f"⚠️  Article saved to local file but NOT indexed to Elasticsearch")
+            logger.error("Elasticsearch indexing failed: %s", e, exc_info=True)
+            logger.warning("Article saved to local file but not indexed to Elasticsearch")
             # Don't return error - continue with local file publication
             es_success = False
 
@@ -250,10 +273,10 @@ class PublisherAgent(BaseAgent):
         )
 
         if es_success:
-            logger.info(f"✅ Publication workflow completed successfully (Elasticsearch + Local File)")
+            logger.info("Publication workflow completed successfully (Elasticsearch + Local File)")
         else:
-            logger.info(f"✅ Publication workflow completed (Local File Only - Elasticsearch indexing failed)")
-        logger.info(f"   Total published articles: {len(self.published_articles)}")
+            logger.info("Publication workflow completed (Local File Only - Elasticsearch indexing failed)")
+        logger.debug("Total published articles: %s", len(self.published_articles))
 
         result = {
             "status": "success",
@@ -282,21 +305,19 @@ class PublisherAgent(BaseAgent):
 
     async def _unpublish_article(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Unpublish article from Elasticsearch (set status to unpublished)"""
-        logger.info("📤 Processing article unpublish request...")
+        logger.info("Processing article unpublish request")
 
         story_id = request.get("story_id")
         if not story_id:
-            logger.error("❌ No story_id provided")
+            logger.error("No story_id provided")
             return {
                 "status": "error",
                 "message": "No story_id provided"
             }
 
-        logger.info(f"   Story ID: {story_id}")
-
         # Check Elasticsearch connection
         if not self.es_client:
-            logger.error("❌ Elasticsearch not available")
+            logger.error("Elasticsearch not available")
             return {
                 "status": "error",
                 "message": "Elasticsearch not configured or unavailable"
@@ -304,7 +325,7 @@ class PublisherAgent(BaseAgent):
 
         # Update document status in Elasticsearch
         try:
-            logger.info(f"📊 Updating article status in Elasticsearch...")
+            logger.debug("Updating article status in Elasticsearch story=%s", story_id)
             response = self.es_client.update(
                 index=self.es_index,
                 id=story_id,
@@ -313,11 +334,10 @@ class PublisherAgent(BaseAgent):
                     "unpublished_at": datetime.now().isoformat()
                 }
             )
-            logger.info(f"✅ Article status updated in Elasticsearch")
-            logger.info(f"   Result: {response['result']}")
+            logger.debug("Article status updated result=%s", response['result'])
 
         except Exception as e:
-            logger.error(f"❌ Failed to update Elasticsearch: {e}", exc_info=True)
+            logger.error("Failed to update Elasticsearch: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Failed to unpublish article: {str(e)}",
@@ -325,9 +345,9 @@ class PublisherAgent(BaseAgent):
             }
 
         # Mock CI/CD - Remove from production
-        logger.info("🔄 [MOCK CI/CD] Removing from production...")
+        logger.debug("[MOCK CI/CD] Removing from production")
         time.sleep(1)
-        logger.info("✅ [MOCK CI/CD] Article removed from production")
+        logger.debug("[MOCK CI/CD] Article removed from production")
 
         # Update local record
         if story_id in self.published_articles:
@@ -341,6 +361,81 @@ class PublisherAgent(BaseAgent):
             "unpublished_at": datetime.now().isoformat()
         }
 
+    async def _bulk_publish(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Bulk publish multiple articles to Elasticsearch using the bulk API"""
+        logger.info("Processing bulk article publication count=%s", len(request.get("articles", [])))
+
+        articles = request.get("articles", [])
+        if not articles:
+            return {"status": "error", "message": "No articles provided for bulk publish"}
+
+        if not self.es_client:
+            return {"status": "error", "message": "Elasticsearch not configured or unavailable"}
+
+        # Build bulk actions
+        actions = []
+        results = {"succeeded": [], "failed": []}
+
+        for article_data in articles:
+            story_id = article_data.get("story_id")
+            if not story_id:
+                results["failed"].append({"error": "Missing story_id", "article": article_data.get("headline", "unknown")})
+                continue
+
+            try:
+                tags, categories = await self._generate_tags_and_categories(article_data)
+                es_document = self._build_es_document(article_data, tags, categories)
+
+                actions.append({
+                    "_index": self.es_index,
+                    "_id": story_id,
+                    "_source": es_document
+                })
+            except Exception as e:
+                logger.error("Failed to prepare article %s: %s", story_id, e)
+                results["failed"].append({"story_id": story_id, "error": str(e)})
+
+        if not actions:
+            return {"status": "error", "message": "No valid articles to index", "failed": results["failed"]}
+
+        # Execute bulk indexing
+        try:
+            success_count, errors = bulk(
+                self.es_client,
+                actions,
+                refresh="wait_for",
+                raise_on_error=False
+            )
+
+            logger.info("Bulk indexed %s articles", success_count)
+
+            for action in actions:
+                story_id = action["_id"]
+                results["succeeded"].append(story_id)
+                self.published_articles[story_id] = {
+                    "story_id": story_id,
+                    "headline": action["_source"].get("headline"),
+                    "published_at": action["_source"].get("published_at"),
+                    "elasticsearch_indexed": True
+                }
+
+            if errors:
+                for error in errors:
+                    logger.error("Bulk index error: %s", error)
+                    results["failed"].append(error)
+
+            return {
+                "status": "success",
+                "message": f"Bulk published {success_count} of {len(articles)} articles",
+                "succeeded": len(results["succeeded"]),
+                "failed": len(results["failed"]),
+                "details": results
+            }
+
+        except Exception as e:
+            logger.error("Bulk indexing failed: %s", e, exc_info=True)
+            return {"status": "error", "message": f"Bulk indexing failed: {str(e)}"}
+
     async def _generate_tags_and_categories(self, article_data: Dict[str, Any]) -> tuple[List[str], List[str]]:
         """Generate tags and categories from article content using MCP generate_tags tool"""
 
@@ -349,7 +444,7 @@ class PublisherAgent(BaseAgent):
         topic = article_data.get("topic", "")
 
         try:
-            logger.info(f"🔧 Calling MCP generate_tags tool...")
+            logger.debug("Calling MCP generate_tags tool")
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -369,18 +464,18 @@ class PublisherAgent(BaseAgent):
             tags = tag_data.get("tags", [])
             categories = tag_data.get("categories", [])
 
-            logger.info(f"✅ Tags generated: {len(tags)} tags, {len(categories)} categories")
+            logger.debug("Tags generated count=%s categories=%s", len(tags), len(categories))
             return tags, categories
 
         except Exception as e:
-            logger.error(f"❌ MCP generate_tags tool failed: {e}", exc_info=True)
+            logger.error("MCP generate_tags tool failed: %s", e, exc_info=True)
             # MCP server is required - re-raise the exception
             raise Exception(f"MCP generate_tags tool failed: {e}")
 
     async def _deploy_to_production(self, story_id: str, article_data: Dict[str, Any]) -> Dict[str, Any]:
         """Deploy article to production via MCP deploy_to_production tool"""
         try:
-            logger.info("🚀 Deploying to production via CI/CD pipeline...")
+            logger.info("Deploying to production via CI/CD pipeline")
 
             # Direct call to MCP tool
             if self.mcp_client is None:
@@ -405,22 +500,19 @@ class PublisherAgent(BaseAgent):
             build_info = deployment_data.get("build", {})
             deploy_info = deployment_data.get("deployment", {})
 
-            logger.info(f"✅ Build {build_info.get('number')} completed")
-            logger.info(f"   Duration: {build_info.get('duration_seconds')}s")
-            logger.info(f"✅ Deployment to {deploy_info.get('environment')} completed")
-            logger.info(f"   URL: {deploy_info.get('url')}")
-            logger.info(f"   Deployed at: {deploy_info.get('deployed_at')}")
+            logger.debug("Build %s completed duration=%ss", build_info.get('number'), build_info.get('duration_seconds'))
+            logger.debug("Deployment to %s completed url=%s", deploy_info.get('environment'), deploy_info.get('url'))
 
             return deployment_data
 
         except Exception as e:
-            logger.error(f"❌ Deployment failed: {e}", exc_info=True)
+            logger.error("Deployment failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
     async def _notify_subscribers(self, story_id: str, article_data: Dict[str, Any]) -> Dict[str, Any]:
         """Notify subscribers via MCP notify_subscribers tool"""
         try:
-            logger.info("📧 Notifying subscribers via CRM...")
+            logger.info("Notifying subscribers via CRM")
 
             # Direct call to MCP tool
             if self.mcp_client is None:
@@ -445,15 +537,12 @@ class PublisherAgent(BaseAgent):
             notif_info = notification_data.get("notification", {})
             metrics = notif_info.get("estimated_metrics", {})
 
-            logger.info(f"✅ Notification sent to {notif_info.get('subscribers_notified')} subscribers")
-            logger.info(f"   Email template: {notif_info.get('email_template')}")
-            logger.info(f"   Expected open rate: {metrics.get('open_rate')}")
-            logger.info(f"   Sent at: {notif_info.get('sent_at')}")
+            logger.debug("Notification sent subscribers=%s template=%s open_rate=%s", notif_info.get('subscribers_notified'), notif_info.get('email_template'), metrics.get('open_rate'))
 
             return notification_data
 
         except Exception as e:
-            logger.error(f"❌ Subscriber notification failed: {e}", exc_info=True)
+            logger.error("Subscriber notification failed: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
     async def _save_article_to_file(self, article_data: Dict[str, Any], tags: List[str], categories: List[str]) -> str:
@@ -462,6 +551,7 @@ class PublisherAgent(BaseAgent):
         topic = article_data.get("topic", "article")
         content = article_data.get("content", "")
         headline = article_data.get("headline", "Untitled")
+        research_sources = article_data.get("research_sources", [])
 
         # Create articles directory if it doesn't exist
         articles_dir = "articles"
@@ -471,6 +561,41 @@ class PublisherAgent(BaseAgent):
         filename = topic.lower().replace(" ", "-").replace(":", "").replace(",", "")
         filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_'))
         filepath = os.path.join(articles_dir, f"{filename}-{story_id}.md")
+
+        # Build research sources section grouped by domain
+        # Always replace any existing Sources section from the LLM with a properly
+        # domain-grouped version built from structured research_sources data
+        sources_section = ""
+        if research_sources:
+            # Strip any existing Sources section from content so we can replace it
+            import re
+            content = re.sub(
+                r'\n##\s+Sources\s*\n.*',
+                '',
+                content,
+                flags=re.DOTALL | re.IGNORECASE
+            ).rstrip()
+
+            # Group sources by domain
+            from urllib.parse import urlparse
+            domain_groups = {}
+            for src in research_sources:
+                url = src.get("url", "")
+                title = src.get("title", url)
+                if not url:
+                    continue
+                domain = urlparse(url).netloc.replace("www.", "")
+                if domain not in domain_groups:
+                    domain_groups[domain] = []
+                domain_groups[domain].append({"title": title, "url": url})
+
+            if domain_groups:
+                sources_section = "\n\n## Sources\n\n"
+                for domain in sorted(domain_groups.keys()):
+                    sources_section += f"**{domain}**\n\n"
+                    for src in domain_groups[domain]:
+                        sources_section += f"- [{src['title']}]({src['url']})\n"
+                    sources_section += "\n"
 
         # Build markdown content with metadata
         markdown_content = f"""---
@@ -485,7 +610,7 @@ categories: {', '.join(categories)}
 ---
 
 {content}
-
+{sources_section}
 ---
 
 **Article Metadata:**
@@ -516,7 +641,7 @@ categories: {', '.join(categories)}
                 published = datetime.fromisoformat(article_data["published_at"].replace("Z", "+00:00"))
                 workflow_duration_ms = int((published - created).total_seconds() * 1000)
             except Exception as e:
-                logger.warning(f"Could not calculate workflow duration: {e}")
+                logger.warning("Could not calculate workflow duration: %s", e)
 
         # Build document
         document = {
@@ -537,9 +662,10 @@ categories: {', '.join(categories)}
             "tags": tags,
             "categories": categories,
             "research_questions": article_data.get("research_questions", []),
-            "research_data": article_data.get("research_data", []),
+            "research_data": self._sanitize_research_data(article_data.get("research_data", [])),
             "editorial_review": article_data.get("editorial_review"),
             "archive_references": article_data.get("archive_references"),
+            "research_sources": article_data.get("research_sources", []),
             "url_slug": article_data.get("url_slug"),
             "filepath": article_data.get("filepath"),
             "version": article_data.get("version", 1),
@@ -631,6 +757,16 @@ def create_agent_card(host: str, port: int) -> AgentCard:
                 examples=[
                     '{"action": "publish_article", "article": {"story_id": "story_123", "headline": "...", "content": "...", ...}}',
                     "Publish completed article to production"
+                ]
+            ),
+            AgentSkill(
+                id="publishing.article.bulk_publish",
+                name="Bulk Publish Articles",
+                description="Publishes multiple articles to Elasticsearch in a single bulk operation for efficiency",
+                tags=["publishing", "elasticsearch", "bulk"],
+                examples=[
+                    '{"action": "bulk_publish", "articles": [{"story_id": "story_1", ...}, {"story_id": "story_2", ...}]}',
+                    "Bulk publish a batch of articles"
                 ]
             ),
             AgentSkill(

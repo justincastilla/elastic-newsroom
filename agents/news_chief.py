@@ -55,7 +55,7 @@ class NewsChiefAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"') and not query.startswith('{"action": "get_story_status"') and not query.startswith('{"action": "list_active_stories"'):
-                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
+                logger.debug("Received query: %s", format_json_for_log(query))
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "assign_story", "story": {"topic": query}}
@@ -63,7 +63,7 @@ class NewsChiefAgent(BaseAgent):
 
             # Only log non-status actions to reduce log spam
             if action not in ["get_status", "get_story_status", "list_active_stories"]:
-                logger.info(f"🎯 Action: {action}")
+                logger.debug("Action: %s", action)
 
             if action == "assign_story":
                 return await self._assign_story(query_data)
@@ -101,7 +101,7 @@ class NewsChiefAgent(BaseAgent):
     
     async def _assign_story(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Assign a story to a reporter with input validation"""
-        logger.info("📝 Processing story assignment...")
+        logger.debug("Processing story assignment...")
         story_data = request.get("story", {})
 
         # Validate story data
@@ -170,15 +170,10 @@ class NewsChiefAgent(BaseAgent):
             }
         )
 
-        logger.info(f"✅ Story created: {story_id}")
-        logger.info(f"   Topic: {story_assignment['topic']}")
-        logger.info(f"   Status: {story_assignment['status']}")
+        logger.info("Story assigned: id=%s topic=%s status=%s", story_id, story_assignment['topic'], story_assignment['status'])
 
         # Send assignment to Reporter via A2A
-        logger.info(f"📤 Sending assignment to Reporter via A2A...")
         reporter_response = await self._send_to_reporter(story_assignment)
-
-        logger.info(f"✅ Assignment completed. Reporter status: {reporter_response.get('status')}")
 
         return {
             "status": "success",
@@ -238,42 +233,37 @@ class NewsChiefAgent(BaseAgent):
 
     async def _submit_draft(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Handle draft submission from Reporter"""
-        logger.info("📝 Processing draft submission...")
-        
         story_id = request.get("story_id")
         draft = request.get("draft", {})
-        
+
         if not story_id or not draft:
             return {
                 "status": "error",
                 "message": "Missing story_id or draft data"
             }
-        
+
         # Debug: Log all active stories
-        logger.info(f"🔍 Active stories in News Chief: {list(self.active_stories.keys())}")
-        logger.info(f"🔍 Looking for story: {story_id}")
-        
+        logger.debug("Active stories in News Chief: %s", list(self.active_stories.keys()))
+        logger.debug("Looking for story: %s", story_id)
+
         if story_id not in self.active_stories:
             return {
                 "status": "error",
                 "message": f"Story {story_id} not found"
             }
-        
+
         # Update story with draft
         self.active_stories[story_id]["draft"] = draft
         self.active_stories[story_id]["status"] = "draft_submitted"
         self.active_stories[story_id]["updated_at"] = datetime.now().isoformat()
-        
-        logger.info(f"✅ Draft submitted for story {story_id}")
-        logger.info(f"   Word count: {draft.get('word_count', 'N/A')}")
-        
+
+        logger.info("Draft submitted: story=%s word_count=%s", story_id, draft.get('word_count', 'N/A'))
+
         # Auto-route to Editor
-        logger.info("🔄 Auto-routing to Editor for review...")
         return await self._route_to_editor({"story_id": story_id})
 
     async def _route_to_editor(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Route story to Editor for review"""
-        logger.info("✏️ Routing story to Editor...")
         
         story_id = request.get("story_id")
         if not story_id or story_id not in self.active_stories:
@@ -324,20 +314,20 @@ class NewsChiefAgent(BaseAgent):
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
                             review_result = json.loads(text_content)
-                            logger.info(f"✅ Editor review completed")
-                            
+                            logger.debug("Editor review completed: %s", review_result.get("review", {}).get("approval_status"))
+
                             # Store review
                             story["editor_review"] = review_result
                             story["status"] = "reviewed"
                             story["updated_at"] = datetime.now().isoformat()
-                            
+
                             # Auto-route back to Reporter if revisions needed
                             if review_result.get("review", {}).get("approval_status") == "needs_minor_revisions":
-                                logger.info("🔄 Auto-routing back to Reporter for revisions...")
+                                logger.info("Routed to Reporter: story=%s action=revisions", story_id)
                                 return await self._route_to_reporter({"story_id": story_id})
                             else:
                                 # Ready for publication
-                                logger.info("✅ Story approved, routing to Publisher...")
+                                logger.info("Routed to Publisher: story=%s", story_id)
                                 return await self._route_to_publisher({"story_id": story_id})
                             break
                 
@@ -348,7 +338,7 @@ class NewsChiefAgent(BaseAgent):
                 }
                 
         except Exception as e:
-            logger.error(f"Failed to route to Editor: {e}")
+            logger.error("Failed to route to Editor: %s", e)
             return {
                 "status": "error",
                 "message": f"Failed to contact Editor: {str(e)}"
@@ -356,7 +346,6 @@ class NewsChiefAgent(BaseAgent):
 
     async def _route_to_reporter(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Route story back to Reporter for revisions"""
-        logger.info("📝 Routing story back to Reporter for revisions...")
         
         story_id = request.get("story_id")
         if not story_id or story_id not in self.active_stories:
@@ -392,16 +381,16 @@ class NewsChiefAgent(BaseAgent):
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
                             revision_result = json.loads(text_content)
-                            logger.info(f"✅ Revisions applied")
-                            
+                            logger.debug("Revisions applied: %s", revision_result.get('status'))
+
                             # Update story with revised draft
                             if "draft" in revision_result:
                                 story["draft"] = revision_result["draft"]
                                 story["status"] = "revised"
                                 story["updated_at"] = datetime.now().isoformat()
-                                
+
                                 # Auto-route to Publisher
-                                logger.info("✅ Revisions complete, routing to Publisher...")
+                                logger.info("Routed to Publisher: story=%s", story_id)
                                 return await self._route_to_publisher({"story_id": story_id})
                             break
                 
@@ -412,7 +401,7 @@ class NewsChiefAgent(BaseAgent):
                 }
                 
         except Exception as e:
-            logger.error(f"Failed to route to Reporter: {e}")
+            logger.error("Failed to route to Reporter: %s", e)
             return {
                 "status": "error",
                 "message": f"Failed to contact Reporter: {str(e)}"
@@ -420,7 +409,6 @@ class NewsChiefAgent(BaseAgent):
 
     async def _route_to_publisher(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Route story to Publisher for publication"""
-        logger.info("📰 Routing story to Publisher...")
         
         story_id = request.get("story_id")
         if not story_id or story_id not in self.active_stories:
@@ -471,14 +459,14 @@ class NewsChiefAgent(BaseAgent):
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
                             publish_result = json.loads(text_content)
-                            logger.info(f"✅ Article published")
-                            
+                            logger.info("Article published: story=%s", story_id)
+
                             # Update story status
                             story["status"] = "published"
                             story["published_at"] = datetime.now().isoformat()
                             story["updated_at"] = datetime.now().isoformat()
                             story["publication_result"] = publish_result
-                            
+
                             return {
                                 "status": "success",
                                 "message": "Story published successfully",
@@ -494,7 +482,7 @@ class NewsChiefAgent(BaseAgent):
                 }
                 
         except Exception as e:
-            logger.error(f"Failed to route to Publisher: {e}")
+            logger.error("Failed to route to Publisher: %s", e)
             return {
                 "status": "error",
                 "message": f"Failed to contact Publisher: {str(e)}"
@@ -503,7 +491,7 @@ class NewsChiefAgent(BaseAgent):
     async def _trigger_write_async(self, story_id: str):
         """Trigger article writing asynchronously without blocking"""
         try:
-            logger.info(f"🔄 Background task: Sending write command for story {story_id}")
+            logger.debug("Background task: Sending write command for story %s", story_id)
 
             # Create a new HTTP client for this async task
             async with httpx.AsyncClient(timeout=300.0) as http_client:
@@ -525,9 +513,7 @@ class NewsChiefAgent(BaseAgent):
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
                             write_result = json.loads(text_content)
-                            logger.info(f"✅ Background task: Write command completed")
-                            logger.info(f"   Status: {write_result.get('status')}")
-                            logger.info(f"   Message: {write_result.get('message')}")
+                            logger.debug("Background task: Write command completed: status=%s message=%s", write_result.get('status'), write_result.get('message'))
 
                             # Update story status based on result
                             if story_id in self.active_stories:
@@ -536,12 +522,12 @@ class NewsChiefAgent(BaseAgent):
                                     # Store article data for UI retrieval
                                     if 'article_data' in write_result:
                                         self.active_stories[story_id]['article_data'] = write_result['article_data']
-                                        logger.info(f"✅ Stored article data for story {story_id}")
+                                        logger.debug("Stored article data for story %s", story_id)
                                 else:
                                     self.active_stories[story_id]['status'] = 'error'
                             break
         except Exception as e:
-            logger.error(f"Background task error for story {story_id}: {e}")
+            logger.error("Background task error for story %s: %s", story_id, e)
             if story_id in self.active_stories:
                 self.active_stories[story_id]['status'] = 'error'
 
@@ -559,15 +545,11 @@ class NewsChiefAgent(BaseAgent):
                     "action": "accept_assignment",
                     "assignment": assignment
                 }
-                logger.info(f"📨 Sending A2A message to Reporter:")
-                logger.info(f"   Action: {request['action']}")
-                logger.info(f"   Story ID: {assignment.get('story_id')}")
-                logger.info(f"   Topic: {assignment.get('topic')}")
+                logger.info("Sending to Reporter: action=%s story=%s topic=%s", request['action'], assignment.get('story_id'), assignment.get('topic'))
 
                 message = create_text_message_object(content=json.dumps(request))
 
                 # Get response for assignment acceptance
-                logger.info(f"⏳ Waiting for Reporter response...")
                 assignment_result = None
                 async for response in reporter_client.send_message(message):
                     if hasattr(response, 'parts'):
@@ -575,20 +557,15 @@ class NewsChiefAgent(BaseAgent):
                         text_content = part.root.text if hasattr(part, 'root') and hasattr(part.root, 'text') else None
                         if text_content:
                             assignment_result = json.loads(text_content)
-                            logger.info(f"📬 Received A2A response from Reporter:")
-                            logger.info(f"   Status: {assignment_result.get('status')}")
-                            logger.info(f"   Message: {assignment_result.get('message')}")
-                            logger.info(f"   Reporter Status: {assignment_result.get('reporter_status')}")
+                            logger.debug("Reporter response: status=%s message=%s reporter_status=%s", assignment_result.get('status'), assignment_result.get('message'), assignment_result.get('reporter_status'))
                             break
 
                 if not assignment_result:
-                    logger.warning("⚠️  No response from Reporter")
+                    logger.warning("No response from Reporter")
                     return {"status": "error", "message": "No response from Reporter"}
 
                 # If assignment was accepted, trigger the Reporter to start writing (async, don't wait)
                 if assignment_result.get('status') == 'success':
-                    logger.info(f"✅ Assignment accepted, triggering article writing in background...")
-
                     # Update story status to 'writing'
                     story_id = assignment.get('story_id')
                     if story_id in self.active_stories:
@@ -597,7 +574,6 @@ class NewsChiefAgent(BaseAgent):
                     # Send write_article command but don't wait for response
                     # The Reporter will work asynchronously
                     import asyncio
-                    logger.info(f"📝 Triggering write_article command (async)...")
 
                     # Fire and forget - don't wait for the response
                     asyncio.create_task(self._trigger_write_async(story_id))
@@ -605,7 +581,7 @@ class NewsChiefAgent(BaseAgent):
                 return assignment_result
 
         except Exception as e:
-            logger.error(f"Failed to send assignment to Reporter: {e}", exc_info=True)
+            logger.error("Failed to send assignment to Reporter: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Failed to contact Reporter: {str(e)}"

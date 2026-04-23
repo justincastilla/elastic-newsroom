@@ -9,9 +9,19 @@ All configuration is managed through environment variables in your `.env` file. 
 #### Anthropic API
 ```bash
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
+ANTHROPIC_MODEL=claude-sonnet-4-6  # Optional, defaults to claude-sonnet-4-6
 ```
 **Used by:** Reporter, Researcher, Editor, Publisher
 **Purpose:** AI-powered content generation, research, editing, and tag generation
+**Model:** Configurable via `ANTHROPIC_MODEL` env var, defaults to `claude-sonnet-4-6`
+
+#### Tavily API (Web Search)
+```bash
+TAVILY_API_KEY=your_tavily_api_key_here
+```
+**Used by:** Researcher (research_questions MCP tool)
+**Purpose:** Real web search for research instead of Claude-fabricated data
+**Note:** Required for the research workflow to function
 
 #### Elasticsearch (Direct Access)
 ```bash
@@ -67,6 +77,7 @@ cp env.example .env
 ### 2. Fill in required variables
 At minimum, you need:
 - `ANTHROPIC_API_KEY`
+- `TAVILY_API_KEY`
 - `ELASTICSEARCH_ENDPOINT`
 - `ELASTICSEARCH_API_KEY`
 - `ELASTIC_ARCHIVIST_INDEX`
@@ -163,6 +174,10 @@ If not configured:
 ```bash
 # AI/LLM
 ANTHROPIC_API_KEY=sk-ant-api03-xxx...
+ANTHROPIC_MODEL=claude-sonnet-4-6
+
+# Web Search (Required for research)
+TAVILY_API_KEY=your_tavily_api_key_here
 
 # Elasticsearch (Direct Write Access)
 ELASTICSEARCH_ENDPOINT=<your_es_endpoint_here>
