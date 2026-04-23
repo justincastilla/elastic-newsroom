@@ -59,7 +59,7 @@ class ResearcherAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
+                logger.info("Received query: %s", format_json_for_log(query))
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -67,7 +67,7 @@ class ResearcherAgent(BaseAgent):
 
             # Only log non-status actions to reduce log spam
             if action != "get_status":
-                logger.info(f"🎯 Action: {action}")
+                logger.info("Action: %s", action)
 
             if action == "research_questions":
                 return await self._research_questions(query_data)
@@ -83,13 +83,13 @@ class ResearcherAgent(BaseAgent):
                 }
 
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in query: {e}")
+            logger.error("Invalid JSON in query: %s", e)
             return {
                 "status": "error",
                 "message": f"Invalid JSON in query: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"❌ Error processing request: {e}", exc_info=True)
+            logger.error("Error processing request: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Error processing request: {str(e)}"
@@ -97,25 +97,20 @@ class ResearcherAgent(BaseAgent):
 
     async def _research_questions(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Research multiple questions and return structured data"""
-        logger.info("🔍 Processing research request...")
+        logger.info("Processing research request...")
 
         questions = request.get("questions", [])
         topic = request.get("topic", "")
         story_id = request.get("story_id", "")
 
         if not questions:
-            logger.error("❌ No questions provided")
+            logger.error("No questions provided")
             return {
                 "status": "error",
                 "message": "No questions provided"
             }
 
-        logger.info(f"📋 Research request details:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Topic: {topic}")
-        logger.info(f"   Questions: {len(questions)}")
-        for i, question in enumerate(questions[:5], 1):
-            logger.info(f"   {i}. {question}")
+        logger.info("Research request: story=%s topic=%s questions=%s", story_id, topic, len(questions))
 
         # Publish event: research started
         await self._publish_event(
@@ -128,7 +123,7 @@ class ResearcherAgent(BaseAgent):
         try:
             research_results = await self._conduct_bulk_research(questions[:5], topic)
         except Exception as e:
-            logger.error(f"❌ Error conducting bulk research: {e}")
+            logger.error("Error conducting bulk research: %s", e)
             # Fallback to empty results on error
             research_results = [{
                 "question": q,
@@ -161,9 +156,7 @@ class ResearcherAgent(BaseAgent):
             }
         )
 
-        logger.info(f"✅ Research completed")
-        logger.info(f"   Research ID: {research_id}")
-        logger.info(f"   Questions answered: {len(research_results)}")
+        logger.info("Research completed: id=%s answered=%s", research_id, len(research_results))
 
         return {
             "status": "success",
@@ -178,7 +171,7 @@ class ResearcherAgent(BaseAgent):
         """Conduct research for multiple questions using MCP research_questions tool"""
 
         try:
-            logger.info(f"🔧 Calling MCP research_questions tool for {len(questions)} questions...")
+            logger.info("Calling MCP research_questions tool for %s questions...", len(questions))
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -194,47 +187,28 @@ class ResearcherAgent(BaseAgent):
 
             # Parse the JSON response
             results = json.loads(result) if isinstance(result, str) else result
-            logger.info(f"✅ Received {len(results)} research results from MCP tool")
+            logger.info("Received %s research results from MCP tool", len(results))
 
             # Ensure we have results for all questions (in case tool didn't answer all)
             if len(results) < len(questions):
-                logger.warning(f"⚠️  MCP tool returned {len(results)} results for {len(questions)} questions")
-                # Fill in missing results with mock data
+                logger.debug("MCP tool returned %s results for %s questions", len(results), len(questions))
                 for i in range(len(results), len(questions)):
-                    results.append(self._generate_mock_research(questions[i]))
+                    results.append({
+                        "question": questions[i],
+                        "claim_verified": False,
+                        "confidence": 0,
+                        "summary": "No research results available for this question.",
+                        "facts": [],
+                        "figures": {},
+                        "sources": []
+                    })
 
             return results
 
         except Exception as e:
-            logger.error(f"❌ MCP tool call error: {e}", exc_info=True)
+            logger.error("MCP tool call error: %s", e, exc_info=True)
             # MCP server is required - re-raise the exception
             raise Exception(f"MCP research_questions tool failed: {e}")
-
-    def _generate_mock_research(self, question: str) -> Dict[str, Any]:
-        """Generate mock research when Anthropic API is not available"""
-        return {
-            "question": question,
-            "claim_verified": True,
-            "confidence": 75,
-            "summary": "Mock research data generated. Configure ANTHROPIC_API_KEY for real research.",
-            "facts": [
-                "Industry adoption has increased significantly in recent years",
-                "Leading technology companies are investing heavily in this area",
-                "Market analysts project continued growth through 2025"
-            ],
-            "figures": {
-                "percentages": ["45%", "60% year-over-year growth"],
-                "dollar_amounts": ["$1.5 billion", "$3.2 billion projected"],
-                "numbers": ["500 companies", "1.2 million users"],
-                "dates": ["Q3 2024", "2025"],
-                "companies": ["TechCorp", "InnovateLabs", "DataSystems"]
-            },
-            "sources": [
-                "Mock Industry Report 2024 (ANTHROPIC_API_KEY not configured)",
-                "Mock Market Analysis",
-                "Mock Tech Survey"
-            ]
-        }
 
     async def _get_history(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Get research history by research_id or story_id"""

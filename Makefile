@@ -1,4 +1,4 @@
-.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose install clean start start-logs stop logs logs-color
+.PHONY: help test test-fast test-all test-unit test-integration test-workflow test-archivist test-verbose validate install clean start start-logs stop logs logs-color
 
 # Default target
 help:
@@ -15,6 +15,7 @@ help:
 	@echo "  make test-archivist    - Run Archivist A2A integration tests"
 	@echo "  make test-verbose      - Run tests with verbose output"
 	@echo "  make test-coverage     - Run tests with coverage report"
+	@echo "  make validate          - Validate all API keys and endpoints"
 	@echo ""
 	@echo "Development:"
 	@echo "  make install           - Install dependencies"
@@ -63,6 +64,10 @@ test-verbose:
 test-coverage:
 	@echo "🧪 Running tests with coverage..."
 	pytest --cov=agents --cov=utils --cov-report=html --cov-report=term
+
+validate:
+	@echo "🔑 Validating API keys and endpoints..."
+	pytest -v -s tests/test_validate_config.py
 
 # Development targets
 install:

@@ -2,7 +2,7 @@
 Newsroom Tools MCP Server
 
 Provides MCP tools for the Elastic News newsroom agents:
-1. research_questions - Answers research questions with structured data (uses Anthropic)
+1. research_questions - Researches questions via Tavily web search + Claude synthesis
 2. generate_outline - Creates article outline and identifies research needs (uses Anthropic)
 3. generate_article - Creates article content from outline and research (uses Anthropic)
 4. apply_edits - Applies editorial suggestions to article (uses Anthropic)
@@ -12,6 +12,7 @@ Provides MCP tools for the Elastic News newsroom agents:
 8. notify_subscribers - Simulates CRM subscriber notification (mock)
 
 Tools that require AI use Anthropic Claude for content generation.
+Research uses Tavily for real web search results.
 """
 
 import json
@@ -20,19 +21,31 @@ import time
 from typing import List, Dict, Any
 from fastmcp import FastMCP
 from anthropic import Anthropic
+from tavily import TavilyClient
 
 # Load environment variables
 from utils import load_env_config
 load_env_config()
 
+from utils.config import DEFAULT_MODEL
+
 # Initialize Anthropic client
 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
 if not anthropic_api_key:
-    print("⚠️  WARNING: ANTHROPIC_API_KEY not set - MCP tools will use fallback mock data")
+    print("WARNING: ANTHROPIC_API_KEY not set - MCP tools will use fallback mock data")
     anthropic_client = None
 else:
     anthropic_client = Anthropic(api_key=anthropic_api_key)
-    print("✅ Anthropic client initialized for MCP tools")
+    print("Anthropic client initialized for MCP tools")
+
+# Initialize Tavily client
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+if not tavily_api_key:
+    print("WARNING: TAVILY_API_KEY not set - research tool will use Anthropic-only fallback")
+    tavily_client = None
+else:
+    tavily_client = TavilyClient(api_key=tavily_api_key)
+    print("Tavily client initialized for web search")
 
 # Initialize FastMCP server
 mcp = FastMCP("Newsroom Tools")
@@ -41,7 +54,11 @@ mcp = FastMCP("Newsroom Tools")
 @mcp.tool()
 def research_questions(questions: List[str], topic: str) -> str:
     """
-    Research multiple questions and return structured data with facts, figures, and sources.
+    Research multiple questions using Tavily web search and return structured data
+    with facts, figures, and real source URLs.
+
+    Uses Tavily for real web search results, then optionally Claude to synthesize
+    into structured format. Falls back gracefully if either service is unavailable.
 
     Args:
         questions: List of research questions to answer
@@ -50,88 +67,121 @@ def research_questions(questions: List[str], topic: str) -> str:
     Returns:
         JSON string containing research results for each question with facts, figures, and sources
     """
-    if not anthropic_client:
-        # Fallback to mock data if Anthropic not available
-        results = []
-        for i, question in enumerate(questions, 1):
+    results = []
+
+    for i, question in enumerate(questions, 1):
+        # Step 1: Search with Tavily for real web results
+        tavily_results = None
+        tavily_answer = None
+        sources = []
+
+        if tavily_client:
+            try:
+                search = tavily_client.search(
+                    query=f"{topic}: {question}",
+                    search_depth="advanced",
+                    max_results=5,
+                    include_answer=True,
+                    topic="news"
+                )
+                tavily_answer = search.get("answer", "")
+                tavily_results = search.get("results", [])
+                sources = [
+                    {
+                        "title": r.get("title", ""),
+                        "url": r.get("url", ""),
+                        "content": r.get("content", "")[:300],
+                        "score": r.get("score", 0),
+                        "published_date": r.get("published_date", "")
+                    }
+                    for r in tavily_results
+                ]
+            except Exception as e:
+                print("Tavily search error for question %d: %s" % (i, e))
+
+        # Step 2: Synthesize with Claude if available
+        if anthropic_client and (tavily_results or tavily_answer):
+            try:
+                synthesis_prompt = f"""You are a research assistant. Based on these web search results, provide a structured research answer.
+
+QUESTION: {question}
+TOPIC: {topic}
+
+TAVILY SUMMARY: {tavily_answer or 'No summary available'}
+
+SEARCH RESULTS:
+{json.dumps(sources, indent=2)}
+
+Return ONLY a JSON object with this structure:
+{{
+  "question_number": {i},
+  "question": "{question}",
+  "claim_verified": true/false,
+  "confidence": 0-100,
+  "summary": "brief synthesized answer",
+  "facts": ["fact 1", "fact 2", ...],
+  "figures": {{
+    "percentages": ["45%", ...],
+    "dollar_amounts": ["$1.5B", ...],
+    "numbers": ["500 companies", ...],
+    "dates": ["Q4 2024", ...],
+    "companies": ["CompanyName", ...]
+  }},
+  "sources": [
+    {{"title": "Article Title", "url": "https://...", "published_date": "2026-04-15"}}
+  ]
+}}"""
+
+                response = anthropic_client.messages.create(
+                    model=DEFAULT_MODEL,
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": synthesis_prompt}]
+                )
+
+                content = response.content[0].text
+                if content.startswith("```"):
+                    content = content.split("```")[1]
+                    if content.startswith("json"):
+                        content = content[4:]
+                content = content.strip()
+
+                result = json.loads(content)
+                results.append(result)
+                continue
+
+            except Exception as e:
+                print("Claude synthesis error for question %d: %s" % (i, e))
+
+        # Step 3: Return Tavily results directly if Claude unavailable
+        if tavily_results or tavily_answer:
             results.append({
                 "question_number": i,
                 "question": question,
                 "claim_verified": True,
-                "confidence": 70,
-                "summary": f"Mock research data for: {question}",
-                "facts": [f"Fact 1 about {topic}", f"Fact 2 about {topic}"],
-                "figures": {"percentages": ["45%"], "numbers": ["1000"]},
-                "sources": [f"{topic} Report 2024"]
-            })
-        return json.dumps(results, indent=2)
-
-    # Use Anthropic to research questions
-    prompt = f"""You are a research assistant. Answer the following research questions about "{topic}" with factual data, statistics, and sources.
-
-RESEARCH QUESTIONS:
-{chr(10).join(f"{i+1}. {q}" for i, q in enumerate(questions))}
-
-For each question, provide:
-- A concise summary answer
-- 3-5 specific facts
-- Relevant figures (percentages, dollar amounts, numbers, dates, company names)
-- Credible sources
-
-Return ONLY a JSON array with this structure:
-[
-  {{
-    "question_number": 1,
-    "question": "the question",
-    "claim_verified": true/false,
-    "confidence": 0-100,
-    "summary": "brief answer",
-    "facts": ["fact 1", "fact 2", ...],
-    "figures": {{
-      "percentages": ["45%", ...],
-      "dollar_amounts": ["$1.5B", ...],
-      "numbers": ["500 companies", ...],
-      "dates": ["Q4 2024", ...],
-      "companies": ["CompanyName", ...]
-    }},
-    "sources": ["Source 1", "Source 2", ...]
-  }}
-]"""
-
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        content = response.content[0].text
-
-        # Clean up markdown code blocks if present
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        content = content.strip()
-
-        # Validate JSON
-        results = json.loads(content)
-        return json.dumps(results, indent=2)
-
-    except Exception as e:
-        print(f"Error calling Anthropic for research: {e}")
-        # Fallback to simple mock data
-        results = []
-        for i, question in enumerate(questions, 1):
-            results.append({
-                "question_number": i,
-                "question": question,
-                "summary": f"Research for: {question}",
-                "facts": ["Data unavailable"],
+                "confidence": 75,
+                "summary": tavily_answer or "See sources for details.",
+                "facts": [r.get("content", "")[:200] for r in (tavily_results or [])[:3]],
                 "figures": {},
-                "sources": []
+                "sources": [
+                    {"title": r.get("title", ""), "url": r.get("url", ""), "published_date": r.get("published_date", "")}
+                    for r in (tavily_results or [])
+                ]
             })
-        return json.dumps(results, indent=2)
+            continue
+
+        # Step 4: No Tavily, no results - return error (no more fake data)
+        results.append({
+            "question_number": i,
+            "question": question,
+            "claim_verified": False,
+            "confidence": 0,
+            "summary": "Research unavailable - configure TAVILY_API_KEY for web search.",
+            "facts": [],
+            "figures": {},
+            "sources": []
+        })
+
+    return json.dumps(results, indent=2)
 
 
 @mcp.tool()
@@ -173,7 +223,7 @@ Return ONLY a JSON object:
 
     try:
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=DEFAULT_MODEL,
             max_tokens=1000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -189,7 +239,7 @@ Return ONLY a JSON object:
         return json.dumps(outline_data, indent=2)
 
     except Exception as e:
-        print(f"Error generating outline: {e}")
+        print("Error generating outline: %s" % e)
         return json.dumps({
             "outline": f"Introduction to {topic}, Analysis, Conclusion",
             "research_questions": [f"What are the key facts about {topic}?"]
@@ -240,15 +290,18 @@ Instructions:
 - Write in professional journalistic style
 - Include a compelling HEADLINE at the start
 - Use facts and figures from the research data
-- Cite sources where appropriate
-- Meet the target length (within 10%)
+- When citing a fact, statistic, or quote from the research data, mention the source name inline (e.g., "according to Forbes", "Reuters reported")
+- At the end of the article, include a "## Sources" section listing every source URL used
+- Group sources by their domain/publication (e.g., "**NYTimes.com**", "**Reuters.com**", "**NPR.org**"), then list each article as a bullet under its group: `- [Article Title](URL)`
+- Include ALL source URLs from the research data — do not omit any
+- Meet the target length (within 10%) — the Sources section does not count toward the word count
 - Make it engaging and informative
 
-Return ONLY the article text (headline + body), no JSON."""
+Return ONLY the article text (headline + body + sources section), no JSON."""
 
     try:
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=DEFAULT_MODEL,
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -257,7 +310,7 @@ Return ONLY the article text (headline + body), no JSON."""
         return article
 
     except Exception as e:
-        print(f"Error generating article: {e}")
+        print("Error generating article: %s" % e)
         return f"""HEADLINE: {topic}
 
 {topic} has emerged as a significant topic. {angle if angle else "This story examines key developments."}
@@ -323,7 +376,7 @@ Return ONLY a JSON object with this structure:
 
     try:
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=DEFAULT_MODEL,
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -339,7 +392,7 @@ Return ONLY a JSON object with this structure:
         return json.dumps(review, indent=2)
 
     except Exception as e:
-        print(f"Error reviewing article: {e}")
+        print("Error reviewing article: %s" % e)
         return json.dumps({
             "overall_assessment": f"Review of {topic} - API error",
             "grammar_issues": [],
@@ -395,7 +448,7 @@ Instructions:
 
     try:
         response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=DEFAULT_MODEL,
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -404,7 +457,7 @@ Instructions:
         return revised_content
 
     except Exception as e:
-        print(f"Error applying edits: {e}")
+        print("Error applying edits: %s" % e)
         # Fallback to simple replacement
         revised_content = original_content
         for edit in edits:
@@ -541,10 +594,18 @@ def notify_subscribers(story_id: str, headline: str, topic: str) -> str:
     return json.dumps(result, indent=2)
 
 
+# Health check endpoint for Docker and monitoring
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "healthy", "service": "Newsroom MCP Server"})
+
+
 # Export the FastMCP HTTP app for uvicorn
-# FastMCP provides multiple ASGI apps: http_app, sse_app, streamable_http_app
-# We use http_app for standard HTTP JSON-RPC 2.0 communication
-app = mcp.http_app
+# FastMCP 3.x http_app() serves the MCP protocol via SSE at /mcp
+app = mcp.http_app()
 
 if __name__ == "__main__":
     # Run the MCP server

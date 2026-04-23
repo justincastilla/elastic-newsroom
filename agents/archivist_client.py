@@ -39,7 +39,8 @@ def extract_response_text(response_data: Any) -> str:
     Handles various response formats:
     - String: returned as-is
     - Dict with 'text' field: extracts text value
-    - Dict without 'text': logs warning and serializes to JSON
+    - Dict with 'message' field: extracts message value (Elastic Agent Builder format)
+    - Dict without 'text' or 'message': logs warning and serializes to JSON
     - List: attempts to extract text from items, otherwise serializes
     - Other types: converts to string with warning
 
@@ -56,22 +57,16 @@ def extract_response_text(response_data: Any) -> str:
         # If response is a dict, try to extract text from expected fields
         if "text" in response_data:
             return response_data["text"]
+        elif "message" in response_data:
+            return response_data["message"]
         else:
             # Log warning about unexpected structure before falling back to JSON serialization
-            logger.warning(
-                f"⚠️  Unexpected response dict structure. Expected 'text' field not found."
-            )
-            logger.warning(f"   Response keys: {list(response_data.keys())}")
-            logger.warning(f"   Full response (truncated): {truncate_text(str(response_data), max_length=200)}")
-            logger.warning(f"   Falling back to JSON serialization.")
+            logger.warning("Unexpected response dict structure. Expected 'text' field not found. Response keys: %s. Full response (truncated): %s. Falling back to JSON serialization.", list(response_data.keys()), truncate_text(str(response_data), max_length=200))
             return json.dumps(response_data, indent=2)
 
     elif isinstance(response_data, list):
         # Handle list responses (might be multiple parts)
-        logger.warning(
-            f"⚠️  Response is a list with {len(response_data)} items. "
-            f"Attempting to extract text from parts."
-        )
+        logger.warning("Response is a list with %d items. Attempting to extract text from parts.", len(response_data))
         text_parts = []
         for item in response_data:
             if isinstance(item, str):
@@ -82,11 +77,62 @@ def extract_response_text(response_data: Any) -> str:
 
     else:
         # Fallback: convert to string
-        logger.warning(
-            f"⚠️  Unexpected response type: {type(response_data).__name__}. "
-            f"Converting to string."
-        )
+        logger.warning("Unexpected response type: %s. Converting to string.", type(response_data).__name__)
         return str(response_data) if response_data else ""
+
+
+def resolve_agent_url(agent_url: Optional[str] = None, card_url: Optional[str] = None) -> str:
+    """
+    Resolve the base Kibana URL and agent ID from either an agent URL or card URL.
+
+    Supports multiple URL formats:
+    - Agent URL: https://host/api/agent_builder/a2a/{agentId}
+    - Card URL:  https://host/api/agent_builder/a2a/{agentId}.json
+    - Card URL:  https://host/.well-known/a2a/agent-card.json
+
+    For /.well-known/ card URLs, the agent ID defaults to "elastic-ai-agent"
+    since it can't be derived from the URL.
+
+    Args:
+        agent_url: Direct A2A endpoint URL (preferred)
+        card_url: Agent card URL (fallback)
+
+    Returns:
+        Tuple-style dict with 'base_url' and 'agent_id'
+
+    Raises:
+        Exception: If neither URL is provided or URL format is unrecognized
+    """
+    url = agent_url or card_url
+    if not url:
+        raise Exception(
+            "No Archivist URL configured. "
+            "Set ELASTIC_ARCHIVIST_AGENT_URL or ELASTIC_ARCHIVIST_AGENT_CARD_URL."
+        )
+
+    # Format: https://host/api/agent_builder/a2a/{agentId}[.json]
+    if "/api/agent_builder/a2a/" in url:
+        base_url = url.split("/api/agent_builder/")[0]
+        agent_id = url.split("/api/agent_builder/a2a/")[-1].replace(".json", "")
+        logger.debug("Resolved agent URL: base=%s, agent_id=%s", base_url, agent_id)
+        return {"base_url": base_url, "agent_id": agent_id}
+
+    # Format: https://host/.well-known/a2a/agent-card.json
+    if "/.well-known/" in url:
+        base_url = url.split("/.well-known/")[0]
+        logger.debug("Resolved .well-known card URL: base=%s (using default agent_id)", base_url)
+        return {"base_url": base_url, "agent_id": "elastic-ai-agent"}
+
+    # Format: https://host/api/agent_builder/converse (legacy direct endpoint)
+    if "/api/agent_builder/" in url:
+        base_url = url.split("/api/agent_builder/")[0]
+        logger.debug("Resolved legacy agent_builder URL: base=%s", base_url)
+        return {"base_url": base_url, "agent_id": "elastic-ai-agent"}
+
+    raise Exception(
+        f"Unrecognized Archivist URL format: {url}. "
+        "Expected /api/agent_builder/a2a/{{agentId}} or /.well-known/a2a/agent-card.json"
+    )
 
 
 def prepare_search_query(query: str, index: str = ARCHIVE_INDEX, format_type: str = "summary") -> str:
@@ -123,9 +169,10 @@ async def converse(
     query: str,
     story_id: str,
     agent_url: Optional[str] = None,
+    card_url: Optional[str] = None,
     api_key: str = None,
     max_retries: int = 10,
-    agent_id: str = "elastic-ai-agent"
+    agent_id: str = None
 ) -> Dict[str, Any]:
     """
     Call the Archivist agent via /converse endpoint with retry logic.
@@ -135,10 +182,11 @@ async def converse(
     Args:
         query: Search query to send to Archivist
         story_id: Story ID for tracking
-        agent_url: Base KB URL (e.g., https://...kb.../api/agent_builder/a2a/elastic-ai-agent)
+        agent_url: Direct A2A endpoint URL (preferred)
+        card_url: Agent card URL (fallback if agent_url not set)
         api_key: Elastic Archivist API key
         max_retries: Maximum number of retry attempts (default: 10)
-        agent_id: Agent ID to chat with (default: "elastic-ai-agent")
+        agent_id: Agent ID to chat with (overrides ID derived from URL)
 
     Returns:
         Dict with status, query, response, and conversation_id
@@ -151,20 +199,14 @@ async def converse(
     if not api_key:
         raise Exception("api_key is required")
 
-    # Parse the base URL from agent_url
-    # agent_url format: https://...kb.../api/agent_builder/a2a/elastic-ai-agent
-    # We need: https://...kb.../api/agent_builder/converse
-    if agent_url and "/api/agent_builder/" in agent_url:
-        base_url = agent_url.split("/api/agent_builder/")[0]
-        endpoint = f"{base_url}/api/agent_builder/converse"
-    else:
-        raise Exception("Invalid agent_url - must contain /api/agent_builder/")
+    # Resolve the base URL and agent ID from whichever URL is available
+    resolved = resolve_agent_url(agent_url=agent_url, card_url=card_url)
+    base_url = resolved["base_url"]
+    if agent_id is None:
+        agent_id = resolved["agent_id"]
+    endpoint = f"{base_url}/api/agent_builder/converse"
 
-    logger.info(f"🔍 Archivist Client - Using /converse endpoint")
-    logger.info(f"   Endpoint: {endpoint}")
-    logger.info(f"   Query: {query}")
-    logger.info(f"   Story ID: {story_id}")
-    logger.info(f"   Agent ID: {agent_id}")
+    logger.debug("Archivist Client - Using /converse endpoint. Endpoint: %s, Query: %s, Story ID: %s, Agent ID: %s", endpoint, query, story_id, agent_id)
 
     # Prepare the search query using helper function
     prepared_query = prepare_search_query(query, format_type="summary")
@@ -183,21 +225,12 @@ async def converse(
     }
 
     # Log request details
-    logger.info(f"")
-    logger.info(f"=" * 80)
-    logger.info(f"📨 ARCHIVIST /converse REQUEST")
-    logger.info(f"=" * 80)
-    logger.info(f"Endpoint: {endpoint}")
-    logger.info(f"")
-    logger.info(f"JSON Payload:")
-    logger.info(json.dumps(converse_request, indent=2))
-    logger.info(f"=" * 80)
-    logger.info(f"")
+    logger.debug("ARCHIVIST /converse REQUEST - Endpoint: %s, Payload: %s", endpoint, json.dumps(converse_request, indent=2))
 
     # Retry loop
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(f"🔄 Attempt {attempt}/{max_retries} (timeout: 60s)")
+            logger.info("Attempt %d/%d (timeout: 60s)", attempt, max_retries)
             start_time = time.time()
 
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -208,15 +241,8 @@ async def converse(
                 )
 
             elapsed = time.time() - start_time
-            logger.info(f"📥 Response received in {elapsed:.2f}s")
-            logger.info(f"   Status Code: {response.status_code}")
-
-            # Log raw response (truncated)
             response_text = response.text
-            logger.info(f"📥 Archivist response received (Attempt {attempt})")
-            logger.info(f"   Status: {response.status_code}")
-            logger.info(f"   Length: {len(response_text)} characters")
-            logger.info(f"   Preview: {truncate_text(response_text, max_length=100)}")
+            logger.info("Archivist response received (Attempt %d) - Status: %d, Length: %d characters, Preview: %s", attempt, response.status_code, len(response_text), truncate_text(response_text, max_length=100))
 
             # Check status
             response.raise_for_status()
@@ -237,8 +263,7 @@ async def converse(
 
                 # Check if we got content
                 if response_text and len(response_text.strip()) > 0:
-                    logger.info(f"✅ Success on attempt {attempt} - {len(response_text)} characters")
-                    logger.info(f"   Conversation ID: {conversation_id}")
+                    logger.info("Success on attempt %d - %d characters, Conversation ID: %s", attempt, len(response_text), conversation_id)
                     return {
                         "status": "success",
                         "query": query,
@@ -247,40 +272,38 @@ async def converse(
                         "articles": []  # Could parse this from response if needed
                     }
                 else:
-                    logger.warning(f"⚠️  Empty response on attempt {attempt}")
-                    logger.warning(f"   Response data type: {type(response_data)}")
-                    logger.warning(f"   Response data: {response_data}")
+                    logger.warning("Empty response on attempt %d - Response data type: %s, Response data: %s", attempt, type(response_data), response_data)
                     if attempt < max_retries:
-                        logger.info(f"   Waiting 2 seconds before retry...")
+                        logger.info("Waiting 2 seconds before retry...")
                         await asyncio.sleep(2)
                         continue
                     else:
-                        raise Exception(f"Empty response after {max_retries} attempts")
+                        raise Exception("Empty response after %d attempts" % max_retries)
 
         except httpx.TimeoutException as e:
-            logger.warning(f"⏰ Timeout on attempt {attempt}: {e}")
+            logger.warning("Timeout on attempt %d: %s", attempt, e)
             if attempt < max_retries:
-                logger.info(f"   Retrying...")
+                logger.info("Retrying...")
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"Timeout after {max_retries} attempts")
+                raise Exception("Timeout after %d attempts" % max_retries)
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"❌ HTTP error on attempt {attempt}: {e.response.status_code}")
+            logger.error("HTTP error on attempt %d: %d", attempt, e.response.status_code)
             if attempt < max_retries:
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"HTTP error after {max_retries} attempts: {e}")
+                raise Exception("HTTP error after %d attempts: %s" % (max_retries, e))
 
         except Exception as e:
-            logger.error(f"❌ Error on attempt {attempt}: {type(e).__name__}: {e}")
+            logger.error("Error on attempt %d: %s: %s", attempt, type(e).__name__, e)
             if attempt < max_retries:
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"Failed after {max_retries} attempts: {e}")
+                raise Exception("Failed after %d attempts: %s" % (max_retries, e))
 
     raise Exception(f"Failed after {max_retries} attempts")
 
@@ -289,6 +312,7 @@ async def send_task(
     query: str,
     story_id: str,
     agent_url: Optional[str] = None,
+    card_url: Optional[str] = None,
     api_key: str = None,
     max_retries: int = 10
 ) -> Dict[str, Any]:
@@ -300,7 +324,8 @@ async def send_task(
     Args:
         query: Search query to send to Archivist
         story_id: Story ID for message tracking
-        agent_url: Direct A2A endpoint URL (e.g., https://.../a2a/agent-id)
+        agent_url: Direct A2A endpoint URL (preferred)
+        card_url: Agent card URL (fallback if agent_url not set)
         api_key: Elastic Archivist API key
         max_retries: Maximum number of retry attempts (default: 10)
 
@@ -315,11 +340,10 @@ async def send_task(
     if not api_key:
         raise Exception("api_key is required")
 
-    endpoint = agent_url
-    logger.info(f"🔍 Archivist Client - Using A2A JSONRPC /a2a endpoint")
-    logger.info(f"   Endpoint: {endpoint}")
-    logger.info(f"   Query: {query}")
-    logger.info(f"   Story ID: {story_id}")
+    # Resolve the A2A endpoint from whichever URL is available
+    resolved = resolve_agent_url(agent_url=agent_url, card_url=card_url)
+    endpoint = f"{resolved['base_url']}/api/agent_builder/a2a/{resolved['agent_id']}"
+    logger.debug("Archivist Client - Using A2A JSONRPC /a2a endpoint. Endpoint: %s, Query: %s, Story ID: %s", endpoint, query, story_id)
 
     # Generate unique message ID
     timestamp_ms = int(time.time() * 1000)
@@ -360,22 +384,12 @@ async def send_task(
     }
 
     # Log request details
-    logger.info(f"")
-    logger.info(f"=" * 80)
-    logger.info(f"📨 ARCHIVIST A2A JSONRPC REQUEST")
-    logger.info(f"=" * 80)
-    logger.info(f"Message ID: {message_id}")
-    logger.info(f"Endpoint: {endpoint}")
-    logger.info(f"")
-    logger.info(f"JSON Payload:")
-    logger.info(json.dumps(a2a_request, indent=2))
-    logger.info(f"=" * 80)
-    logger.info(f"")
+    logger.debug("ARCHIVIST A2A JSONRPC REQUEST - Message ID: %s, Endpoint: %s, Payload: %s", message_id, endpoint, json.dumps(a2a_request, indent=2))
 
     # Retry loop
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(f"🔄 Attempt {attempt}/{max_retries} (timeout: 60s)")
+            logger.info("Attempt %d/%d (timeout: 60s)", attempt, max_retries)
             start_time = time.time()
 
             async with httpx.AsyncClient(timeout=60.0) as client:
@@ -386,15 +400,8 @@ async def send_task(
                 )
 
             elapsed = time.time() - start_time
-            logger.info(f"📥 Response received in {elapsed:.2f}s")
-            logger.info(f"   Status Code: {response.status_code}")
-
-            # Log raw response (truncated)
             response_text = response.text
-            logger.info(f"📥 Archivist response received (Attempt {attempt})")
-            logger.info(f"   Status: {response.status_code}")
-            logger.info(f"   Length: {len(response_text)} characters")
-            logger.info(f"   Preview: {truncate_text(response_text, max_length=100)}")
+            logger.info("Archivist response received (Attempt %d) - Status: %d, Length: %d characters, Preview: %s", attempt, response.status_code, len(response_text), truncate_text(response_text, max_length=100))
 
             # Check status
             response.raise_for_status()
@@ -418,7 +425,7 @@ async def send_task(
 
                     # Check if we got content
                     if full_text and len(full_text) > 0:
-                        logger.info(f"✅ Success on attempt {attempt} - {len(full_text)} characters")
+                        logger.info("Success on attempt %d - %d characters", attempt, len(full_text))
                         return {
                             "status": "success",
                             "query": query,
@@ -427,47 +434,47 @@ async def send_task(
                             "articles": []  # Could parse this from response if needed
                         }
                     else:
-                        logger.warning(f"⚠️  Empty content on attempt {attempt}")
+                        logger.warning("Empty content on attempt %d", attempt)
                         if attempt < max_retries:
-                            logger.info(f"   Waiting 2 seconds before retry...")
+                            logger.info("Waiting 2 seconds before retry...")
                             await asyncio.sleep(2)
                             continue
                         else:
-                            raise Exception(f"Empty content after {max_retries} attempts")
+                            raise Exception("Empty content after %d attempts" % max_retries)
 
                 elif "error" in result:
                     error_msg = result.get("error", {}).get("message", "Unknown error")
-                    logger.error(f"❌ A2A error: {error_msg}")
+                    logger.error("A2A error: %s", error_msg)
                     if attempt < max_retries:
                         await asyncio.sleep(2)
                         continue
                     else:
-                        raise Exception(f"A2A error after {max_retries} attempts: {error_msg}")
+                        raise Exception("A2A error after %d attempts: %s" % (max_retries, error_msg))
 
         except httpx.TimeoutException as e:
-            logger.warning(f"⏰ Timeout on attempt {attempt}: {e}")
+            logger.warning("Timeout on attempt %d: %s", attempt, e)
             if attempt < max_retries:
-                logger.info(f"   Retrying...")
+                logger.info("Retrying...")
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"Timeout after {max_retries} attempts")
+                raise Exception("Timeout after %d attempts" % max_retries)
 
         except httpx.HTTPStatusError as e:
-            logger.error(f"❌ HTTP error on attempt {attempt}: {e.response.status_code}")
+            logger.error("HTTP error on attempt %d: %d", attempt, e.response.status_code)
             if attempt < max_retries:
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"HTTP error after {max_retries} attempts: {e}")
+                raise Exception("HTTP error after %d attempts: %s" % (max_retries, e))
 
         except Exception as e:
-            logger.error(f"❌ Error on attempt {attempt}: {type(e).__name__}: {e}")
+            logger.error("Error on attempt %d: %s: %s", attempt, type(e).__name__, e)
             if attempt < max_retries:
                 await asyncio.sleep(2)
                 continue
             else:
-                raise Exception(f"Failed after {max_retries} attempts: {e}")
+                raise Exception("Failed after %d attempts: %s" % (max_retries, e))
 
     raise Exception(f"Failed after {max_retries} attempts")
 
@@ -480,7 +487,7 @@ async def call_archivist(
     agent_url: Optional[str] = None,
     api_key: str = None,
     max_retries: int = 10,
-    agent_id: str = "elastic-ai-agent"
+    agent_id: str = None
 ) -> Dict[str, Any]:
     """
     Legacy method that calls converse(). Kept for backward compatibility.
@@ -491,6 +498,7 @@ async def call_archivist(
         query=query,
         story_id=story_id,
         agent_url=agent_url,
+        card_url=agent_card_url,
         api_key=api_key,
         max_retries=max_retries,
         agent_id=agent_id

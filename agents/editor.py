@@ -61,7 +61,7 @@ class EditorAgent(BaseAgent):
         try:
             # Only log non-status queries to reduce log spam
             if not query.startswith('{"action": "get_status"'):
-                logger.info(f"📥 Received query:\n{format_json_for_log(query)}")
+                logger.info("Received query: %s", format_json_for_log(query))
 
             # Parse the query to determine the action
             query_data = json.loads(query) if query.startswith('{') else {"action": "status"}
@@ -69,7 +69,7 @@ class EditorAgent(BaseAgent):
 
             # Only log non-status actions to reduce log spam
             if action != "get_status":
-                logger.info(f"🎯 Action: {action}")
+                logger.info("Action: %s", action)
 
             if action == "review_draft":
                 return await self._review_draft(query_data)
@@ -85,13 +85,13 @@ class EditorAgent(BaseAgent):
                 }
 
         except json.JSONDecodeError as e:
-            logger.error(f"❌ Invalid JSON in query: {e}")
+            logger.error("Invalid JSON in query: %s", e)
             return {
                 "status": "error",
                 "message": f"Invalid JSON in query: {str(e)}"
             }
         except Exception as e:
-            logger.error(f"❌ Error processing request: {e}", exc_info=True)
+            logger.error("Error processing request: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Error processing request: {str(e)}"
@@ -99,12 +99,12 @@ class EditorAgent(BaseAgent):
 
     async def _review_draft(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Review a draft from the Reporter"""
-        logger.info("📝 Processing draft review request...")
+        logger.info("Processing draft review request...")
         draft = request.get("draft", {})
 
         # Validate draft
         if not draft:
-            logger.error("❌ No draft data provided")
+            logger.error("No draft data provided")
             return {
                 "status": "error",
                 "message": "No draft data provided"
@@ -112,7 +112,7 @@ class EditorAgent(BaseAgent):
 
         story_id = draft.get("story_id")
         if not story_id:
-            logger.error("❌ Draft missing story_id")
+            logger.error("Draft missing story_id")
             return {
                 "status": "error",
                 "message": "Draft missing story_id"
@@ -120,16 +120,13 @@ class EditorAgent(BaseAgent):
 
         content = draft.get("content")
         if not content:
-            logger.error("❌ Draft missing content")
+            logger.error("Draft missing content")
             return {
                 "status": "error",
                 "message": "Draft missing content"
             }
 
-        logger.info(f"📋 Draft details:")
-        logger.info(f"   Story ID: {story_id}")
-        logger.info(f"   Word Count: {draft.get('word_count')}")
-        logger.info(f"   Target Length: {draft.get('assignment', {}).get('target_length')}")
+        logger.info("Draft received: story=%s words=%s target=%s", story_id, draft.get('word_count'), draft.get('assignment', {}).get('target_length'))
 
         # Store draft under review
         self.drafts_under_review[story_id] = {
@@ -150,9 +147,9 @@ class EditorAgent(BaseAgent):
 
         # Perform review
         try:
-            logger.info("🤖 Calling Anthropic API to review article...")
+            logger.info("Calling Anthropic API to review article...")
             review_result = await self._perform_review(draft)
-            logger.info(f"✅ Review completed")
+            logger.info("Review completed")
 
             # Store review
             review_id = f"review_{story_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -181,9 +178,7 @@ class EditorAgent(BaseAgent):
                 }
             )
 
-            logger.info(f"✅ Review stored successfully")
-            logger.info(f"   Review ID: {review_id}")
-            logger.info(f"   Total reviews: {len(self.reviews)}")
+            logger.info("Review stored successfully: review_id=%s total=%s", review_id, len(self.reviews))
 
             return {
                 "status": "success",
@@ -195,7 +190,7 @@ class EditorAgent(BaseAgent):
             }
 
         except Exception as e:
-            logger.error(f"❌ Error performing review: {e}", exc_info=True)
+            logger.error("Error performing review: %s", e, exc_info=True)
             self.drafts_under_review[story_id]["review_status"] = "error"
             return {
                 "status": "error",
@@ -212,7 +207,7 @@ class EditorAgent(BaseAgent):
         topic = assignment.get("topic", "N/A")
 
         try:
-            logger.info(f"🔧 Calling MCP review_article tool...")
+            logger.info("Calling MCP review_article tool...")
 
             # Direct call to MCP tool (bypass LLM selection for efficiency and reliability)
             if self.mcp_client is None:
@@ -230,11 +225,11 @@ class EditorAgent(BaseAgent):
 
             # Parse the JSON response
             review_data = json.loads(result) if isinstance(result, str) else result
-            logger.info(f"✅ Review completed: {review_data.get('approval_status')}")
+            logger.info("Review completed: status=%s", review_data.get('approval_status'))
             return review_data
 
         except Exception as e:
-            logger.error(f"❌ MCP review_article tool failed: {e}", exc_info=True)
+            logger.error("MCP review_article tool failed: %s", e, exc_info=True)
             # MCP server is required - re-raise the exception
             raise Exception(f"MCP review_article tool failed: {e}")
 
@@ -259,7 +254,7 @@ class EditorAgent(BaseAgent):
                 "target_length": target_length,
                 "difference": difference,
                 "meets_requirement": meets_requirement,
-                "recommendation": f"Article is {'within acceptable range' if meets_requirement else f'{abs(difference)} words too {"long" if difference > 0 else "short"} - please adjust'}"
+                "recommendation": "Article is within acceptable range" if meets_requirement else f"Article is {abs(difference)} words too {'long' if difference > 0 else 'short'} - please adjust"
             },
             "suggested_edits": [
                 {

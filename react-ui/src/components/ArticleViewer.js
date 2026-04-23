@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ArrowLeft, FileText, Calendar, User, Tag } from 'lucide-react';
+import { ArrowLeft, FileText, Calendar, User, Tag, ExternalLink } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -24,19 +24,34 @@ const ArticleViewer = ({ storyId, onBack }) => {
       if (response.ok) {
         let articleData = await response.json();
 
-        // Fix headline if it's "Untitled" but content has "HEADLINE:" prefix
-        if (articleData.headline === "Untitled" && articleData.content) {
+        // Fix headline if it's "Untitled" but content has a meaningful title
+        if ((articleData.headline === "Untitled" || !articleData.headline) && articleData.content) {
           const lines = articleData.content.split('\n');
+
+          // Priority 1: "HEADLINE: ..." prefix
           const headlineLine = lines.find(line => line.trim().startsWith('HEADLINE:'));
           if (headlineLine) {
             articleData.headline = headlineLine.replace('HEADLINE:', '').trim();
+          } else {
+            // Priority 2: First markdown heading (# Title)
+            const headingLine = lines.find(line => /^#{1,2}\s+.+/.test(line.trim()));
+            if (headingLine) {
+              articleData.headline = headingLine.trim().replace(/^#+\s+/, '');
+            }
           }
         }
 
-        // Remove "HEADLINE: ..." line from content since we display it separately
-        if (articleData.content) {
+        // Remove the title line from content since we display it separately as the page heading
+        if (articleData.content && articleData.headline && articleData.headline !== "Untitled") {
           const lines = articleData.content.split('\n');
-          const filteredLines = lines.filter(line => !line.trim().startsWith('HEADLINE:'));
+          const filteredLines = lines.filter(line => {
+            const trimmed = line.trim();
+            // Remove HEADLINE: lines
+            if (trimmed.startsWith('HEADLINE:')) return false;
+            // Remove the markdown heading that matches our extracted headline
+            if (/^#{1,2}\s+/.test(trimmed) && trimmed.replace(/^#+\s+/, '') === articleData.headline) return false;
+            return true;
+          });
           articleData.content = filteredLines.join('\n').trim();
         }
 
@@ -220,6 +235,35 @@ const ArticleViewer = ({ storyId, onBack }) => {
               </div>
             )}
           </div>
+
+          {/* Research Sources */}
+          {article.research_sources && article.research_sources.length > 0 && (
+            <div className="mt-8 pt-6 border-t border-gray-200">
+              <h3 className="font-semibold text-gray-900 mb-3">Sources</h3>
+              <div className="space-y-2">
+                {article.research_sources.map((source, index) => (
+                  <div key={index} className="flex items-start gap-2 text-sm">
+                    <ExternalLink className="h-4 w-4 mt-0.5 text-blue-500 flex-shrink-0" />
+                    <div>
+                      <a
+                        href={source.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 hover:underline font-medium"
+                      >
+                        {source.title || source.url}
+                      </a>
+                      {source.published_date && (
+                        <span className="ml-2 text-gray-400">
+                          {new Date(source.published_date).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Article Footer */}
           {article.agents_involved && (

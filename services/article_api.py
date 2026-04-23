@@ -6,8 +6,8 @@ It queries Elasticsearch directly to serve published articles to the React UI.
 """
 
 import os
-from typing import Optional
-from fastapi import FastAPI, HTTPException
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from elasticsearch import Elasticsearch
 from pydantic import BaseModel
@@ -52,13 +52,11 @@ try:
         )
         # Test connection
         info = es_client.info()
-        logger.info(f"✅ Connected to Elasticsearch")
-        logger.info(f"   Version: {info['version']['number']}")
-        logger.info(f"   Index: {es_index}")
+        logger.info("Connected to Elasticsearch - Version: %s, Index: %s", info['version']['number'], es_index)
     else:
-        logger.warning("⚠️  Elasticsearch credentials not configured")
+        logger.warning("Elasticsearch credentials not configured")
 except Exception as e:
-    logger.error(f"❌ Failed to connect to Elasticsearch: {e}")
+    logger.error("Failed to connect to Elasticsearch: %s", e)
     es_client = None
 
 
@@ -75,6 +73,7 @@ class ArticleResponse(BaseModel):
     tags: Optional[list] = []
     categories: Optional[list] = []
     agents_involved: Optional[list] = []
+    research_sources: Optional[list] = []
 
 
 @app.get("/health")
@@ -101,10 +100,10 @@ async def get_article(story_id: str):
     Raises:
         HTTPException: If Elasticsearch is unavailable or article not found
     """
-    logger.info(f"📄 Fetching article: {story_id}")
+    logger.info("Fetching article: %s", story_id)
 
     if not es_client:
-        logger.error("❌ Elasticsearch not available")
+        logger.error("Elasticsearch not available")
         raise HTTPException(
             status_code=503,
             detail="Elasticsearch is not configured or unavailable"
@@ -118,7 +117,7 @@ async def get_article(story_id: str):
         )
 
         if not response['found']:
-            logger.warning(f"⚠️  Article not found: {story_id}")
+            logger.warning("Article not found: %s", story_id)
             raise HTTPException(
                 status_code=404,
                 detail=f"Article with story_id '{story_id}' not found"
@@ -128,7 +127,7 @@ async def get_article(story_id: str):
         article_data = response.get('_source', {})
 
         if not article_data:
-            logger.warning(f"⚠️  Article data is empty for {story_id}")
+            logger.warning("Article data is empty for %s", story_id)
             raise HTTPException(
                 status_code=404,
                 detail=f"Article with story_id '{story_id}' has no data"
@@ -137,7 +136,21 @@ async def get_article(story_id: str):
         headline = article_data.get('headline') or 'Untitled'
         content = article_data.get('content') or 'No content available'
 
-        logger.info(f"✅ Article retrieved: {headline[:60] if headline else 'N/A'}")
+        # If headline is still "Untitled", try to extract from content
+        if headline == 'Untitled' and content and content != 'No content available':
+            import re
+            lines = content.split('\n')
+            # Priority 1: "HEADLINE: ..." prefix
+            headline_line = next((l.strip() for l in lines if l.strip().startswith('HEADLINE:')), None)
+            if headline_line:
+                headline = headline_line.replace('HEADLINE:', '').strip()
+            else:
+                # Priority 2: First markdown heading (# or ##)
+                heading_line = next((l.strip() for l in lines if re.match(r'^#{1,2}\s+.+', l.strip())), None)
+                if heading_line:
+                    headline = re.sub(r'^#+\s+', '', heading_line)
+
+        logger.info("Article retrieved: %s", headline[:60] if headline else 'N/A')
 
         # Return article in expected format
         return ArticleResponse(
@@ -151,13 +164,14 @@ async def get_article(story_id: str):
             published_at=article_data.get('published_at'),
             tags=article_data.get('tags') or [],
             categories=article_data.get('categories') or [],
-            agents_involved=article_data.get('agents_involved') or []
+            agents_involved=article_data.get('agents_involved') or [],
+            research_sources=article_data.get('research_sources') or []
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Error fetching article: {e}", exc_info=True)
+        logger.error("Error fetching article: %s", e, exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving article: {str(e)}"
@@ -175,37 +189,28 @@ async def get_recent_articles(limit: int = 10):
     Returns:
         List of recent articles with metadata
     """
-    logger.info(f"📋 Fetching {limit} recent articles")
+    logger.info("Fetching %d recent articles", limit)
 
     if not es_client:
-        logger.error("❌ Elasticsearch not available")
+        logger.error("Elasticsearch not available")
         raise HTTPException(
             status_code=503,
             detail="Elasticsearch is not configured or unavailable"
         )
 
     try:
-        # Query for recent articles
+        # Query for recent articles (ES Python client 9.x keyword args)
         response = es_client.search(
             index=es_index,
-            body={
-                "query": {
-                    "match_all": {}
-                },
-                "sort": [
-                    {"published_at": {"order": "desc"}}
-                ],
-                "size": limit,
-                "_source": [
-                    "story_id", "headline", "topic", "word_count",
-                    "published_at", "tags", "categories"
-                ]
-            }
+            query={"match_all": {}},
+            sort=[{"published_at": {"order": "desc"}}],
+            size=limit,
+            source=["story_id", "headline", "topic", "word_count", "published_at", "tags", "categories"]
         )
 
         articles = [hit['_source'] for hit in response['hits']['hits']]
 
-        logger.info(f"✅ Retrieved {len(articles)} recent articles")
+        logger.info("Retrieved %d recent articles", len(articles))
 
         return {
             "total": response['hits']['total']['value'],
@@ -213,18 +218,160 @@ async def get_recent_articles(limit: int = 10):
         }
 
     except Exception as e:
-        logger.error(f"❌ Error fetching recent articles: {e}", exc_info=True)
+        logger.error("Error fetching recent articles: %s", e, exc_info=True)
         raise HTTPException(
             status_code=500,
             detail=f"Error retrieving recent articles: {str(e)}"
         )
 
 
+@app.get("/articles/search")
+async def search_articles(
+    q: str = Query(..., description="Search query text"),
+    mode: str = Query("keyword", description="Search mode: 'keyword', 'semantic', or 'hybrid'"),
+    limit: int = Query(10, description="Maximum number of results"),
+    tag: Optional[str] = Query(None, description="Filter by tag"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+):
+    """
+    Search articles using keyword, semantic, or hybrid search.
+
+    - **keyword**: Traditional full-text search across headline, content, and topic
+    - **semantic**: Natural language search using the semantic_text field (requires inference configured on ES cluster)
+    - **hybrid**: Combines keyword and semantic results using RRF (Reciprocal Rank Fusion)
+
+    Args:
+        q: Search query text
+        mode: Search mode (keyword, semantic, or hybrid)
+        limit: Maximum results to return (default: 10)
+        tag: Optional tag filter
+        category: Optional category filter
+
+    Returns:
+        Search results with relevance scores
+    """
+    logger.info("Searching articles: q='%s', mode=%s, limit=%d", q, mode, limit)
+
+    if not es_client:
+        raise HTTPException(status_code=503, detail="Elasticsearch is not configured or unavailable")
+
+    try:
+        # Build optional filters
+        filter_clauses = [{"term": {"status": "published"}}]
+        if tag:
+            filter_clauses.append({"term": {"tags": tag}})
+        if category:
+            filter_clauses.append({"term": {"categories": category}})
+
+        if mode == "semantic":
+            # Semantic search using semantic_text field
+            search_query = {
+                "bool": {
+                    "must": [
+                        {"semantic": {"field": "content_semantic", "query": q}}
+                    ],
+                    "filter": filter_clauses
+                }
+            }
+        elif mode == "hybrid":
+            # Hybrid search: combine keyword + semantic with sub_searches and RRF
+            response = es_client.search(
+                index=es_index,
+                sub_searches=[
+                    {
+                        "query": {
+                            "multi_match": {
+                                "query": q,
+                                "fields": ["headline^3", "content", "topic^2"],
+                                "type": "best_fields",
+                                "fuzziness": "AUTO"
+                            }
+                        }
+                    },
+                    {
+                        "query": {
+                            "semantic": {"field": "content_semantic", "query": q}
+                        }
+                    }
+                ],
+                rank={"rrf": {"window_size": 50, "rank_constant": 20}},
+                size=limit,
+                source=["story_id", "headline", "topic", "word_count", "published_at", "tags", "categories", "content"]
+            )
+
+            articles = []
+            for hit in response['hits']['hits']:
+                article = hit['_source']
+                article['_score'] = hit.get('_score')
+                articles.append(article)
+
+            return {
+                "total": response['hits']['total']['value'],
+                "mode": "hybrid",
+                "query": q,
+                "articles": articles
+            }
+        else:
+            # Default: keyword search with multi_match
+            search_query = {
+                "bool": {
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": q,
+                                "fields": ["headline^3", "content", "topic^2", "tags^1.5"],
+                                "type": "best_fields",
+                                "fuzziness": "AUTO"
+                            }
+                        }
+                    ],
+                    "filter": filter_clauses
+                }
+            }
+
+        # Execute search (keyword or semantic mode)
+        response = es_client.search(
+            index=es_index,
+            query=search_query,
+            size=limit,
+            source=["story_id", "headline", "topic", "word_count", "published_at", "tags", "categories", "content"],
+            highlight={
+                "fields": {
+                    "content": {"fragment_size": 200, "number_of_fragments": 2},
+                    "headline": {}
+                }
+            }
+        )
+
+        articles = []
+        for hit in response['hits']['hits']:
+            article = hit['_source']
+            article['_score'] = hit.get('_score')
+            # Include highlight snippets if available
+            if 'highlight' in hit:
+                article['highlights'] = hit['highlight']
+            articles.append(article)
+
+        logger.info("Search returned %d results for '%s' (mode=%s)", len(articles), q, mode)
+
+        return {
+            "total": response['hits']['total']['value'],
+            "mode": mode,
+            "query": q,
+            "articles": articles
+        }
+
+    except Exception as e:
+        logger.error("Error searching articles: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error searching articles: {str(e)}"
+        )
+
+
 def main():
     """Start the Article API server"""
-    logger.info("🚀 Starting Article API server...")
-    logger.info("   Port: 8085")
-    logger.info("   CORS: http://localhost:3000, http://localhost:3001")
+    logger.info("Starting Article API server - Port: 8085, CORS: http://localhost:3000, http://localhost:3001")
 
     uvicorn.run(
         app,

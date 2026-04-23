@@ -15,7 +15,7 @@ from typing import List, Dict
 
 # Agent configurations: name, port, module
 AGENTS = [
-    {"name": "MCP Server", "port": 8095, "module": "mcp_servers.newsroom_http_server:app"},
+    {"name": "MCP Server", "port": 8095, "module": "mcp_servers.newsroom_tools:app"},
     {"name": "Event Hub", "port": 8090, "module": "services.event_hub:app"},
     {"name": "Article API", "port": 8085, "module": "services.article_api:app"},
     {"name": "News Chief", "port": 8080, "module": "agents.news_chief:app"},

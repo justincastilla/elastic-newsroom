@@ -14,6 +14,7 @@ import httpx
 from a2a.client import ClientFactory, ClientConfig, A2ACardResolver
 from a2a.types import AgentCard
 from utils import init_anthropic_client
+from utils.config import DEFAULT_MODEL
 from utils.mcp_client import create_mcp_client
 
 
@@ -56,7 +57,7 @@ class BaseAgent:
         Returns:
             Dictionary with status="error" and message
         """
-        self.logger.error(f"❌ {message}")
+        self.logger.error(message)
         return {"status": "error", "message": message, **kwargs}
 
     def _success_response(self, message: str, **kwargs) -> Dict[str, Any]:
@@ -99,12 +100,11 @@ class BaseAgent:
         Raises:
             Exception: If agent discovery or client creation fails
         """
-        self.logger.info(f"🔍 Discovering {agent_name} agent at {agent_url}")
+        self.logger.info("Discovering %s agent at %s, creating A2A client", agent_name, agent_url)
         card_resolver = A2ACardResolver(http_client, agent_url)
         agent_card = await card_resolver.get_agent_card()
-        self.logger.info(f"✅ Found {agent_name}: {agent_card.name} (v{agent_card.version})")
+        self.logger.info("Found %s: %s (v%s)", agent_name, agent_card.name, agent_card.version)
 
-        self.logger.info(f"🔧 Creating A2A client...")
         client_config = ClientConfig(httpx_client=http_client, streaming=False)
         client_factory = ClientFactory(client_config)
         client = client_factory.create(agent_card)
@@ -149,7 +149,7 @@ class BaseAgent:
         self,
         prompt: str,
         max_tokens: int = 2000,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = DEFAULT_MODEL,
         fallback: Any = None
     ) -> Optional[str]:
         """
@@ -168,7 +168,7 @@ class BaseAgent:
             self._init_anthropic_client()
 
         if self.anthropic_client is None:
-            self.logger.warning("⚠️  Anthropic client not available, using fallback")
+            self.logger.warning("Anthropic client not available, using fallback")
             return fallback() if callable(fallback) else fallback
 
         try:
@@ -179,7 +179,7 @@ class BaseAgent:
             )
             return message.content[0].text
         except Exception as e:
-            self.logger.error(f"❌ Anthropic API error: {e}")
+            self.logger.error("Anthropic API error: %s", e)
             return fallback() if callable(fallback) else fallback
 
     # ===== MCP Integration =====
@@ -211,7 +211,7 @@ class BaseAgent:
                     "Set MCP_SERVER_URL environment variable (e.g., http://localhost:8095). "
                     "The MCP server is REQUIRED for all agent operations."
                 )
-                self.logger.error(f"❌ {error_msg}")
+                self.logger.error(error_msg)
                 raise Exception(error_msg)
 
             try:
@@ -224,8 +224,8 @@ class BaseAgent:
                         self._init_anthropic_client()
                     except Exception as e:
                         self.logger.warning(
-                            f"⚠️  Anthropic client not available for MCP tool selection: {e}\n"
-                            f"   MCP tools can still be called directly, but LLM-based tool selection is disabled."
+                            "Anthropic client not available for MCP tool selection: %s. "
+                            "MCP tools can still be called directly, but LLM-based tool selection is disabled.", e
                         )
 
                 self.mcp_client = create_mcp_client(
@@ -233,14 +233,14 @@ class BaseAgent:
                     anthropic_client=self.anthropic_client,
                     agent_name=agent_name
                 )
-                self.logger.info("✅ MCP client initialized")
+                self.logger.info("MCP client initialized")
             except Exception as e:
                 error_msg = (
                     f"Runtime error: Failed to initialize MCP client - {e}. "
                     f"Ensure the MCP server is running at {mcp_server_url}. "
-                    f"Start it with: python -m mcp_servers.newsroom_http_server"
+                    f"Start it with: uvicorn mcp_servers.newsroom_tools:app --port 8095"
                 )
-                self.logger.error(f"❌ {error_msg}")
+                self.logger.error(error_msg)
                 raise Exception(error_msg)
         return self.mcp_client
 
@@ -282,17 +282,17 @@ class BaseAgent:
         if self.mcp_client is None:
             self._init_mcp_client()
 
-        self.logger.info(f"🔧 Calling MCP tool for task: {task_description[:80]}...")
+        self.logger.info("Calling MCP tool for task: %s", task_description[:80])
 
         try:
             result = await self.mcp_client.select_and_call_tool(
                 task_description=task_description,
                 context=context
             )
-            self.logger.info(f"✅ MCP tool call completed successfully")
+            self.logger.info("MCP tool call completed successfully")
             return result
         except Exception as e:
-            self.logger.error(f"❌ MCP tool call failed: {e}")
+            self.logger.error("MCP tool call failed: %s", e)
             raise Exception(f"MCP tool call failed: {e}")
 
     async def _list_mcp_tools(self, force_refresh: bool = False) -> list:
@@ -314,10 +314,10 @@ class BaseAgent:
 
         try:
             tools = await self.mcp_client.list_tools(force_refresh=force_refresh)
-            self.logger.info(f"🔧 Found {len(tools)} MCP tools available")
+            self.logger.debug("Found %s MCP tools available", len(tools))
             return tools
         except Exception as e:
-            self.logger.error(f"❌ Failed to list MCP tools: {e}")
+            self.logger.error("Failed to list MCP tools: %s", e)
             raise Exception(f"Failed to list MCP tools: {e}")
 
     # ===== JSON Utilities =====

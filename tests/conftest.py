@@ -24,7 +24,7 @@ if str(tests_dir) not in sys.path:
     sys.path.insert(0, str(tests_dir))
 
 # Import mocks using relative import
-from mocks import MockAnthropicClient, MockElasticsearchClient
+from mocks import MockAnthropicClient, MockElasticsearchClient, MockTavilyClient
 
 
 # Agent URLs
@@ -81,6 +81,21 @@ def mock_elasticsearch_globally(use_mock_services):
     """
     if use_mock_services:
         with patch('elasticsearch.Elasticsearch', MockElasticsearchClient):
+            yield
+    else:
+        # Use real services
+        yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def mock_tavily_globally(use_mock_services):
+    """
+    Mock Tavily client globally for all tests.
+
+    This prevents tests from requiring a Tavily API key.
+    """
+    if use_mock_services:
+        with patch('tavily.TavilyClient', MockTavilyClient):
             yield
     else:
         # Use real services
@@ -160,6 +175,7 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "integration: marks tests as integration tests")
     config.addinivalue_line("markers", "unit: marks tests as unit tests")
     config.addinivalue_line("markers", "workflow: marks tests that run full workflow")
+    config.addinivalue_line("markers", "validate: marks tests that validate API keys and endpoints")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -173,3 +189,7 @@ def pytest_collection_modifyitems(config, items):
         # Mark unit tests
         if "test_utils" in item.nodeid:
             item.add_marker(pytest.mark.unit)
+
+        # Mark validation tests
+        if "test_validate_config" in item.nodeid:
+            item.add_marker(pytest.mark.validate)

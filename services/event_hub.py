@@ -93,7 +93,7 @@ async def event_stream(request: Request):
     story_id = request.query_params.get('story_id')
     since_param = request.query_params.get('since')
 
-    logger.info(f"📡 New SSE client connected (story_id: {story_id or 'all'}, total clients: {len(connected_clients)})")
+    logger.info("New SSE client connected (story_id: %s, total clients: %d)", story_id or 'all', len(connected_clients))
 
     # Send historical events if 'since' parameter provided
     if since_param:
@@ -106,7 +106,7 @@ async def event_stream(request: Request):
             if story_id:
                 historical_events = [e for e in historical_events if e.get('story_id') == story_id]
 
-            logger.info(f"📜 Sending {len(historical_events)} historical events to client")
+            logger.info("Sending %d historical events to client", len(historical_events))
         except (ValueError, KeyError) as e:
             logger.warning(f"Invalid 'since' parameter: {e}")
             historical_events = []
@@ -165,7 +165,7 @@ async def event_stream(request: Request):
                         last_heartbeat = now
 
         except asyncio.CancelledError:
-            logger.info(f"📡 SSE client disconnected (total clients: {len(connected_clients) - 1})")
+            logger.info("SSE client disconnected (total clients: %d)", len(connected_clients) - 1)
         finally:
             # Remove client from connected list
             if queue in connected_clients:
@@ -214,7 +214,7 @@ async def receive_event(request: Request):
         agent = event.get('agent', 'Unknown')
 
         if event_type not in ['heartbeat', 'status_update']:
-            logger.info(f"📨 Event received: {event_type} from {agent} (story: {story_id})")
+            logger.info("Event received: %s from %s (story: %s)", event_type, agent, story_id)
 
         # Broadcast to all connected clients
         if connected_clients:
@@ -232,13 +232,13 @@ async def receive_event(request: Request):
         })
 
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in event: {e}")
+        logger.error("Invalid JSON in event: %s", e)
         return JSONResponse(
             {"status": "error", "message": f"Invalid JSON: {str(e)}"},
             status_code=400
         )
     except Exception as e:
-        logger.error(f"Error processing event: {e}", exc_info=True)
+        logger.error("Error processing event: %s", e, exc_info=True)
         return JSONResponse(
             {"status": "error", "message": str(e)},
             status_code=500
@@ -297,7 +297,7 @@ async def get_events(request: Request):
 async def clear_history(request: Request):
     """Clear event history (admin endpoint)"""
     event_history.clear()
-    logger.info("🧹 Event history cleared")
+    logger.info("Event history cleared")
     return JSONResponse({
         "status": "success",
         "message": "Event history cleared"
@@ -338,9 +338,7 @@ app = create_app()
 @click.option('--reload', 'reload', is_flag=True, default=False, help='Enable hot reload on file changes')
 def main(host, port, reload):
     """Starts the Event Hub server."""
-    logger.info(f"🚀 Starting Event Hub on {host}:{port}")
-    logger.info(f"📡 SSE endpoint: http://{host}:{port}/stream")
-    logger.info(f"📨 Event receiver: http://{host}:{port}/events")
+    logger.info("Starting Event Hub on %s:%d - SSE endpoint: http://%s:%d/stream - Event receiver: http://%s:%d/events", host, port, host, port, host, port)
 
     uvicorn.run(
         "event_hub:app" if reload else app,

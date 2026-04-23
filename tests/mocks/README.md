@@ -14,6 +14,32 @@ The mock system allows tests to run:
 
 ## Available Mocks
 
+### MockTavilyClient
+
+Mock implementation of the Tavily web search API.
+
+**Features:**
+- Simulates web search results with realistic articles
+- Returns structured results with sources and content
+- No API key required
+- No network calls made
+- Instant responses
+
+**Usage:**
+```python
+from tests.mocks import MockTavilyClient
+
+# Initialize without API key
+client = MockTavilyClient()
+
+# Search the web
+response = client.search("AI in healthcare", max_results=5)
+
+# Access results
+for result in response.get("results", []):
+    print(result["title"], result["url"])
+```
+
 ### MockAnthropicClient
 
 Mock implementation of the Anthropic API client.
@@ -34,7 +60,7 @@ client = MockAnthropicClient()
 
 # Generate content
 response = client.messages.create(
-    model="claude-sonnet-4-20250514",
+    model="claude-sonnet-4-6",
     max_tokens=2000,
     messages=[{"role": "user", "content": "Write an article about AI"}]
 )
@@ -163,7 +189,7 @@ class TestArticleGeneration:
         client = MockAnthropicClient()
 
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1500,
             messages=[{
                 "role": "user",
@@ -191,7 +217,7 @@ def test_article_workflow():
 
     # Generate article
     response = anthropic.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         messages=[{"role": "user", "content": "Write an article."}]
     )

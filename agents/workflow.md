@@ -4,7 +4,7 @@
   | 2   | News Chief | Internal      | Create Story        | -           | Creates story record with unique ID             |
   | 3   | News Chief | Reporter      | Delegate Assignment | A2A         | Sends story assignment via A2A protocol         |
   | 4   | Reporter   | Internal      | Accept Assignment   | -           | Stores assignment internally                    |
-  | 5   | Reporter   | Anthropic     | Generate Questions  | API         | Creates research questions                      |
+  | 5   | Reporter   | MCP/Tavily    | Research Questions  | HTTP        | Calls research_questions tool with Tavily search|
   | 6   | Reporter   | Researcher    | Request Research    | A2A         | Sends questions (parallel with #7)              |
   | 7   | Reporter   | Archivist     | Search Archive      | A2A JSONRPC | Searches historical articles (parallel with #6) |
   | 8   | Researcher | Reporter      | Return Research     | A2A         | Returns research answers                        |
